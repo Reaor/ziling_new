@@ -451,10 +451,10 @@ function buildStrictShapeWithSlack(charCount = 60) {
   return { grid, pool, motion, chars, mask };
 }
 
-// Regression: strict (颜文字/巨字) shapes must NOT freeze once formed — every
-// 里字 keeps sliding (华容道) — while the形状 still holds (chars stay in mask).
-function testStrictShapeKeepsAllCharactersMovingAndHoldsForm() {
-  const { motion, chars, mask } = buildStrictShapeWithSlack();
+// Regression: strict (颜文字/巨字) 是动态呈现 —— 轮廓与字数固定，但里字在掩码内
+// 持续华容道滑动（绝不静止），且始终留在掩码内、不重叠。
+function testStrictShapeKeepsMovingAndHoldsForm() {
+  const { motion, chars, mask } = buildStrictShapeWithSlack(); // 60 chars in 80-cell mask
   const maskSet = new Set(mask.map(m => `${m.x},${m.y}`));
   const moves = new Map(chars.map(c => [c.id, 0]));
   let leaked = 0;
@@ -469,8 +469,8 @@ function testStrictShapeKeepsAllCharactersMovingAndHoldsForm() {
   }
 
   const vals = [...moves.values()].sort((a, b) => a - b);
-  assert.ok(vals[0] >= 120, `strict shape should keep every里字 moving, min moves ${vals[0]}`);
-  assert.equal(leaked, 0, `strict里字 should stay within the shape mask, leaked ${leaked}`);
+  assert.ok(vals[0] >= 120, `strict里字 should keep sliding (dynamic), min moves ${vals[0]}`);
+  assert.equal(leaked, 0, `strict里字 should stay within the shape outline, leaked ${leaked}`);
 }
 
 // Regression: dragging must feel responsive — the engine runs a faster (but
@@ -722,7 +722,7 @@ testOrbitClustersAroundFingerAndFollows();
 testDragProducesRelativeMotionNotRigidTranslation();
 testDynamicCharacterCountStaysCollisionFreeAndInSync();
 testUniformSamplingKeepsSparseFeaturesAndSpread();
-testStrictShapeKeepsAllCharactersMovingAndHoldsForm();
+testStrictShapeKeepsMovingAndHoldsForm();
 testDragRunsFasterTickThenEasesBack();
 testScatterMovesCharacterOutOfStrictFormation();
 testScatterDoesNotTeleportGridPosition();

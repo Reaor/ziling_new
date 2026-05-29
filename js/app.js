@@ -35,7 +35,10 @@ const MAX_CHARS = 112;
 // 形状掩码即字形本身（均匀采样）；里字只填满其中的 FILL_RATIO 比例，余下为
 // "空格"。有空格里字才能像华容道一样持续滑动，而非成形即冻结。填充率越高越易
 // 辨形、越低越灵动；strict（颜文字/巨字）填得更满保辨形，loose（曲线/花）更松。
-const FILL_RATIO = { strict: 0.82, loose: 0.72, flow: 0.80 };
+// 所有动态形状都让里字持续运动：留出空位，里字在掩码内华容道式滑动（轮廓与
+// 字数固定，但不静止）。strict（颜文字/巨字）填得较满保辨形，loose/flow 更松。
+const FILL_RATIO = { strict: 0.8, loose: 0.72, flow: 0.80 };
+const MICRO_AMP = 2.0;         // 亚像素微动幅度（px）：叠加在格子滑动之上的"呼吸"生命感
 const BREAK_PROB = 0.3;        // 点击概率打破轮廓（里字散成自由云团再归位）
 const BREAK_RESTORE_MS = 1600;
 const CHAR_POOL = '天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏闰余成岁律吕调阳云腾致雨露结为霜'.split('');
@@ -172,8 +175,10 @@ document.addEventListener('DOMContentLoaded', () => {
     currentMask = mask;
     currentForm = { flow: !!def.flow, mask, constraint: def.constraint };
     shapeActive = true;
-    // 里字数随形状大小/复杂度自适应：约填满掩码的 FILL_RATIO，余下为流动/华容道空格。
-    const target = Math.round(mask.length * (FILL_RATIO[def.constraint] || 0.75));
+    // 里字数随形状大小/复杂度自适应：约填满掩码的 FILL_RATIO，并始终至少留 4 个
+    // 空格供滑动/流动（避免满铺导致 PIBT 无空位可挪而卡死）。
+    const fill = FILL_RATIO[def.constraint] || 0.75;
+    const target = Math.min(Math.round(mask.length * fill), mask.length - 4);
     adaptCharCount(target, mask);
     formCurrent();
     console.log(`Shape → ${def.name} (${mask.length} cells, ${aliveIds().length}里字, ${def.constraint})`);
@@ -310,10 +315,17 @@ document.addEventListener('DOMContentLoaded', () => {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#e0e0e0';
+    // 亚像素微动：固定阵型（如颜文字/巨字满铺）靠它呈现"呼吸/轻摆"的生命感，
+    // 让里字看起来全员在动而不破坏形状清晰度（位移 < 半格，绝不重叠）。
+    const tSec = now / 1000;
     for (const char of pool.getAll()) {
       if (char.alpha > 0.01) {
+        const mx = Math.sin(tSec * 1.7 + char.id * 1.3) * MICRO_AMP;
+        const my = Math.cos(tSec * 1.4 + char.id * 2.1) * MICRO_AMP;
         ctx.globalAlpha = char.alpha;
-        ctx.fillText(char.char, char.displayX + CELL_SIZE / 2, char.displayY + CELL_SIZE / 2);
+        ctx.fillText(char.char,
+          char.displayX + CELL_SIZE / 2 + mx,
+          char.displayY + CELL_SIZE / 2 + my);
       }
     }
     ctx.globalAlpha = 1;
