@@ -324,19 +324,24 @@ export class MotionEngine {
     }
     this._shapeMask = mask;
 
-    // allocate chars across paths ∝ length, each path keeping ≥1 gap.
+    // allocate chars across paths ∝ length, each path keeping ≥1 gap, but with a
+    // per-stroke floor so short strokes (颜文字的"嘴") aren't starved vs the eyes.
     const ids = [...this._shapeChars];
+    const cap = norm.map(p => Math.max(0, p.cells.length - 1));
     const totalLen = norm.reduce((s, p) => s + p.cells.length, 0) || 1;
-    const alloc = norm.map(p =>
-      Math.min(p.cells.length - 1, Math.max(0, Math.round(ids.length * p.cells.length / totalLen))));
+    const floor = norm.map((p, k) => Math.min(cap[k], Math.min(4, p.cells.length)));
+    const alloc = norm.map((p, k) =>
+      Math.min(cap[k], Math.max(floor[k], Math.round(ids.length * p.cells.length / totalLen))));
     let assigned = alloc.reduce((a, b) => a + b, 0);
-    let g = 0;
-    while (assigned < ids.length && norm.some((p, k) => alloc[k] < p.cells.length - 1)) {
-      if (alloc[g] < norm[g].cells.length - 1) { alloc[g]++; assigned++; }
+    let g = 0, guard = 0;
+    while (assigned < ids.length && norm.some((p, k) => alloc[k] < cap[k]) && guard++ < 10000) {
+      if (alloc[g] < cap[g]) { alloc[g]++; assigned++; }
       g = (g + 1) % norm.length;
     }
-    while (assigned > ids.length) {
-      if (alloc[g] > 0) { alloc[g]--; assigned--; }
+    guard = 0;
+    while (assigned > ids.length && guard++ < 10000) {
+      if (alloc[g] > floor[g]) { alloc[g]--; assigned--; }
+      else if (alloc[g] > 0) { alloc[g]--; assigned--; }
       g = (g + 1) % norm.length;
     }
 
@@ -344,7 +349,7 @@ export class MotionEngine {
     for (let p = 0; p < norm.length; p++) {
       const path = norm[p];
       const L = path.cells.length;
-      const n = alloc[p];
+      const n = Math.min(alloc[p], ids.length - cursor);
       const pIds = ids.slice(cursor, cursor + n);
       cursor += n;
       // seed by nearest path cell → smoother entry (fewer crossings)
@@ -616,7 +621,7 @@ export class MotionEngine {
         if (target && nx === target.tx && ny === target.ty) {
           if (this._shapeConstraint === 'flow' && this._flowOf.has(char.id)) {
             // 到达当前路径格 → 推进一格（少量随机停顿，避免像弹簧一样单调）。
-            if (Math.random() < 0.14) this._setFlowTarget(char.id); // pause one tick
+            if (Math.random() < 0.08) this._setFlowTarget(char.id); // 偶尔停顿一拍（更自然）
             else this._advanceFlowIndex(char.id);
           } else {
             this._wanderTargets.delete(char.id);

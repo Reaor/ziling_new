@@ -23,7 +23,8 @@
  * @license MIT
  */
 
-const FONT_STACK = '"PingFang SC", "Microsoft YaHei", "Heiti SC", sans-serif';
+const FONT_STACK = '"PingFang SC", "Microsoft YaHei", "Heiti SC", "Noto Sans CJK SC", sans-serif';
+const BOLD_FONT_STACK = '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Heiti SC", sans-serif';
 const SS = 6; // supersample factor per grid cell
 
 /* ================================================================
@@ -88,16 +89,16 @@ export class ShapeSystem {
    * @param {number} [maxChars=80]
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
-  sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 80) {
+  sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 96) {
     const text = EMOJI_TEMPLATES[emojiKey] ? emojiKey : '^_^';
-    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.10, (ctx, W, H) => {
+    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.075, (ctx, W, H) => {
       // 颜文字 are wide and short — fit mostly by width, keep a short band.
-      const fs = this._fitFont(ctx, text, W * 0.94, H * 0.6);
-      ctx.font = `${fs}px ${FONT_STACK}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(text, W / 2, H / 2);
+      // 用加粗字体 + 细描边来取样，让"_ ﹏ ."这类窄嘴在下采样后不至于缩成一根线。
+      const fs = this._fitFont(ctx, text, W * 0.96, H * 0.68);
+      this._drawTextMask(ctx, text, W / 2, H / 2, fs, {
+        weight: 700,
+        strokeWidth: Math.max(SS * 0.45, fs * 0.035),
+      });
     });
 
     this.currentMask = mask;
@@ -121,14 +122,14 @@ export class ShapeSystem {
    *   multi-char 巨字 stacking; a single char always renders upright.
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
-  sampleMegachar(char, gridCols, gridRows, maxChars = 100, direction = 'horizontal') {
-    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.14, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, char, W * 0.9, H * 0.9);
-      ctx.font = `${fs}px ${FONT_STACK}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(char, W / 2, H / 2);
+  sampleMegachar(char, gridCols, gridRows, maxChars = 140, direction = 'horizontal') {
+    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.09, (ctx, W, H) => {
+      // 加粗 + 描边取样，让笔画更连贯、更易辨形（视觉层仍渲染普通里字）。
+      const fs = this._fitFont(ctx, char, W * 0.92, H * 0.92);
+      this._drawTextMask(ctx, char, W / 2, H / 2, fs, {
+        weight: 800,
+        strokeWidth: Math.max(SS * 0.65, fs * 0.03),
+      });
     });
 
     this.currentMask = mask;
@@ -348,6 +349,25 @@ export class ShapeSystem {
     const w = ctx.measureText(text).width || 1;
     if (w > maxW) fs *= maxW / w;
     return Math.max(4, Math.floor(fs));
+  }
+
+  /**
+   * Draw text for mask extraction with explicit bold weight + stroke. The visual
+   * layer still renders normal 里字; this only thickens the invisible sampling
+   * stencil so small features (mouth "_", thin strokes) survive cell downsampling
+   * (辨形 + 嘴更厚). @private
+   */
+  _drawTextMask(ctx, text, x, y, fs, { weight = 700, strokeWidth = SS * 0.5 } = {}) {
+    ctx.font = `${weight} ${fs}px ${BOLD_FONT_STACK}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = '#ffffff';
+    ctx.fillStyle = '#ffffff';
+    ctx.lineWidth = strokeWidth;
+    if (strokeWidth > 0) ctx.strokeText(text, x, y);
+    ctx.fillText(text, x, y);
   }
 
   /**

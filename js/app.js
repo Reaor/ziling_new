@@ -31,10 +31,11 @@ const SCATTER_RESTORE_MS = 2500;
 const FADE_MS = 600;           // 里字自适应增减时的淡入/淡出时长
 const INITIAL_CHARS = 56;      // 首屏播种数（之后随形状自适应增减）
 const MIN_CHARS = 28;
-const MAX_CHARS = 130;
+const MAX_CHARS = 156;
 // 流动呈现：里字沿路径流动，约填满路径总格数的 FLOW_FILL，余下为流动所需空位。
-// 所有动态形状里字都持续运动、速率一致（绝不静止）。
-const FLOW_FILL = 0.82;
+// 空位越多越灵动（字更明显地动）、越少越实心。偏低取值优先"全员在动"（用户反馈
+// 不要静止），靠加粗描边采样保证辨形。所有动态形状里字持续运动、速率一致。
+const FLOW_FILL = 0.74;
 // 微动：点击时随点击反应触发的一次性"轻摆"脉冲（全体一起做、随后衰减），
 // 不常驻（常驻会很乱）。MICRO_AMP=幅度(px)，MICRO_DECAY_MS=衰减时长。
 const MICRO_AMP = 3.0;
@@ -72,10 +73,10 @@ document.addEventListener('DOMContentLoaded', () => {
   //   - 曲线/数学曲线：单条闭环路径 → 里字首尾相连绕圈流动。
   // `cells` 控制采样分辨率（越大越清晰、字越多，收束 L33）。里字数随路径总格数自适应。
   const SHAPES = [
-    { name: '^_^',  cells: 70,  make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
-    { name: '>_<',  cells: 70,  make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
-    { name: '心',   cells: 96,  make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
-    { name: '春',   cells: 120, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
+    { name: '^_^',  cells: 96,  make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
+    { name: '>_<',  cells: 96,  make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
+    { name: '心',   cells: 132, make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
+    { name: '春',   cells: 156, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
     { name: '爱心', cells: 80,  make: n => shapes.sampleCurveOrdered('heart', gridCols, gridRows, n) },
     { name: '四叶花', cells: 96, make: n => shapes.sampleCurveOrdered('rose', gridCols, gridRows, n) },
   ];
@@ -88,19 +89,30 @@ document.addEventListener('DOMContentLoaded', () => {
   const aliveChars = () => pool.getAll().filter(c => c.fadeTarget !== 0);
   const aliveIds = () => aliveChars().map(c => c.id);
 
-  // 从画布边缘找一个空格让新里字淡入（首次/需要增生时）。
-  function spawnEdgeChar() {
-    const edge = [];
-    for (let x = 0; x < gridCols; x++) { edge.push([x, 0]); edge.push([x, gridRows - 1]); }
-    for (let y = 1; y < gridRows - 1; y++) { edge.push([0, y]); edge.push([gridCols - 1, y]); }
-    for (let i = edge.length - 1; i > 0; i--) {
-      const j = (Math.random() * (i + 1)) | 0;
-      [edge[i], edge[j]] = [edge[j], edge[i]];
+  // 让新里字在**当前字形内部/轮廓附近**就地淡入浮现（更丝滑），而不是从画布两侧
+  // 排队走进来。优先字形内空格，其次轮廓外一格的"气泡层"，再兜底随机空格。
+  function spawnEmergentChar(mask = []) {
+    const candidates = [];
+    const seen = new Set();
+    const push = (x, y) => {
+      if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) return;
+      const key = grid.getCellKey(x, y);
+      if (seen.has(key) || grid.isOccupied(x, y)) return;
+      seen.add(key);
+      candidates.push([x, y]);
+    };
+    for (const c of mask) push(c.x, c.y);
+    for (const c of mask) {
+      push(c.x + 1, c.y); push(c.x - 1, c.y);
+      push(c.x, c.y + 1); push(c.x, c.y - 1);
     }
-    const cell = edge.find(([x, y]) => !grid.isOccupied(x, y));
-    if (!cell) return null;
+    if (candidates.length === 0) {
+      for (let a = 0; a < 80; a++) push((Math.random() * gridCols) | 0, (Math.random() * gridRows) | 0);
+    }
+    if (candidates.length === 0) return null;
+    const cell = candidates[(Math.random() * candidates.length) | 0];
     const c = pool.acquire(nextGlyph(), cell[0], cell[1]);
-    c.alpha = 0;
+    c.alpha = 0;       // 原地淡入：alpha 0→1，由 stepFades 推进
     c.fadeTarget = 1;
     motion.registerCharacter(c);
     return c;
@@ -123,7 +135,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const alive = aliveChars();
     const diff = target - alive.length;
     if (diff > 0) {
-      for (let k = 0; k < diff; k++) spawnEdgeChar();
+      for (let k = 0; k < diff; k++) spawnEmergentChar(mask);
     } else if (diff < 0) {
       let cx = 0, cy = 0;
       for (const cell of mask) { cx += cell.x; cy += cell.y; }
