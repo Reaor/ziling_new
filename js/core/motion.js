@@ -27,6 +27,11 @@ export class MotionEngine {
     this.cellSize = cellSize;
     this.cellPadding = cellPadding;
     this.tickDuration = 200;
+    // 拖动时改用更快的固定 tick（仍是匀速 —— 不随拖拽"速度"变化，只是
+    // 拖动这一"模态"整体走得更快），让里字能跟手追上被拖去的位置；松手后
+    // 在动量衰减期间平滑回落到常速。详见 _effectiveTick()。
+    this.dragTickDuration = 85;
+    this._dragActive = false;
     this.accumulatedTime = 0;
     this.tickProgress = 0;
     this.characters = new Map();
@@ -192,6 +197,7 @@ export class MotionEngine {
    */
   beginShapeDrag() {
     this._dragMomentum = false; // a fresh grab cancels any leftover slosh
+    this._dragActive = true;    // 切到快速跟手 tick
     if (!this._shapeMask || this._shapeMask.length === 0) {
       this._shapeDragBaseMask = null;
       return false;
@@ -243,6 +249,7 @@ export class MotionEngine {
    */
   endShapeDrag() {
     this._shapeDragBaseMask = null;
+    this._dragActive = false;   // 退出快速 tick，动量期平滑回落常速
     this._dragMomentum = this.dragBias != null && this.dragBias.strength > 0;
     // Strict shapes re-form at the dragged location once the slosh decays.
     if (this._shapeConstraint === 'strict') this._reanchorToMask();
@@ -266,16 +273,35 @@ export class MotionEngine {
       }
     }
 
+    const tick = this._effectiveTick();
     this.accumulatedTime += deltaTime;
     let ticks = 0;
-    while (this.accumulatedTime >= this.tickDuration && ticks < 3) {
+    // 拖动/动量期 tick 更短，允许一帧内多走几步快速追手（仍上限保护）。
+    const maxTicks = this._dragActive || this._dragMomentum ? 4 : 3;
+    while (this.accumulatedTime >= tick && ticks < maxTicks) {
       this._advanceOneStep();
-      this.accumulatedTime -= this.tickDuration;
+      this.accumulatedTime -= tick;
       ticks++;
     }
-    if (this.accumulatedTime >= this.tickDuration) this.accumulatedTime = 0;
-    this.tickProgress = this.accumulatedTime / this.tickDuration;
+    if (this.accumulatedTime >= tick) this.accumulatedTime = 0;
+    this.tickProgress = this.accumulatedTime / tick;
     return this.tickProgress;
+  }
+
+  /**
+   * 当前生效的 tick 时长（ms）。
+   *   - 拖动中：dragTickDuration（快速跟手）
+   *   - 松手动量期：随 dragBias.strength 由快 tick 平滑回落到常速 tick
+   *   - 其余：tickDuration（常速）
+   * 注意：这里切换的是"模态"速度，不是按拖拽瞬时速度变速，故仍满足匀速铁律。
+   */
+  _effectiveTick() {
+    if (this._dragActive) return this.dragTickDuration;
+    if (this._dragMomentum && this.dragBias) {
+      const s = Math.max(0, Math.min(1, this.dragBias.strength));
+      return this.dragTickDuration + (this.tickDuration - this.dragTickDuration) * (1 - s);
+    }
+    return this.tickDuration;
   }
 
   updateDisplayPositions(progress) {
@@ -536,14 +562,6 @@ export class MotionEngine {
     if (this._shapeChars.has(char.id) && this._shapeMask && this._shapeMask.length > 0) {
       const dragging = this.dragBias && this.dragBias.strength > 0.2;
 
-      // Strict + idle → permanently target the anchor (颜文字/巨字 易辨形).
-      // The distance-led sort makes a char that has arrived simply hold.
-      // While dragging, fall through to the broad/surge picker so it 翻涌.
-      if (this._shapeConstraint === 'strict' && !dragging) {
-        this._wanderTargets.set(char.id, { tx: char.anchorX, ty: char.anchorY });
-        return;
-      }
-
       const candidates = [];
       for (const c of this._shapeMask) {
         if (c.x === char.gridX && c.y === char.gridY) continue;
@@ -551,12 +569,20 @@ export class MotionEngine {
         candidates.push(c);
       }
       if (candidates.length > 0) {
-        const pick = this._pickShapeTarget(candidates, char);
+        // strict（颜文字/巨字）：在掩码内做"就近"游走 —— 滑向附近的空格，
+        // 像华容道一样持续轻微挪动，既保持形状辨形，又杜绝整体冻结。
+        // loose（曲线/花）：在整片掩码内自由远游。拖动时一律走 surge 选择。
+        const pick = (this._shapeConstraint === 'strict' && !dragging)
+          ? this._pickLocalShapeTarget(candidates, char)
+          : this._pickShapeTarget(candidates, char);
         if (pick) {
           this._wanderTargets.set(char.id, { tx: pick.x, ty: pick.y });
           return;
         }
       }
+      // 掩码内暂时无空格可去：本 tick 不强行设目标，下一 tick 再试，
+      // 避免被推到掩码外破坏形状。
+      return;
     }
 
     // Free roaming: pick random cell, biased toward drag if active
@@ -610,6 +636,21 @@ export class MotionEngine {
   }
 
   // ── Helpers ───────────────────────────────────────────
+
+  /**
+   * 就近形状目标（strict 专用）：在掩码内的空格中，优先挑离自己最近的一批，
+   * 随机取其一作为下一步目标。效果是里字只做小幅滑动 —— 华容道式的轻微
+   * 挪动，整体形状被牢牢保持（易辨形），同时绝不冻结、人人都在动。
+   */
+  _pickLocalShapeTarget(candidates, char) {
+    const scored = candidates
+      .map(c => ({ c, dist: Math.abs(c.x - char.gridX) + Math.abs(c.y - char.gridY) }))
+      .sort((a, b) => a.dist - b.dist);
+    // 取最近的约 40%（至少 3 个）做随机，保证移动是局部、柔和的。
+    const take = Math.max(3, Math.ceil(scored.length * 0.4));
+    const pool = scored.slice(0, Math.min(take, scored.length));
+    return pool[Math.floor(Math.random() * pool.length)].c;
+  }
 
   _pickShapeTarget(candidates, char) {
     if (this.dragBias && this.dragBias.strength >= 0.1) {

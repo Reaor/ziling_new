@@ -4,10 +4,11 @@
  * Mobile WebView target: 390x700, 16px grid, PIBT cell-by-cell motion.
  *
  * 本入口当前聚焦「拖拽手感」的打磨：
- *   - 匀速：tick 固定，绝不随拖拽速度变速（收束 L23）。
- *   - 跟手：形状区域跟着手指整体平移（壳心跟手）。
+ *   - 匀速：同一时刻所有里字速度一致；拖动期整体切到更快的固定 tick 跟手，
+ *           但不随拖拽瞬时速度变速（收束 L23）。
+ *   - 跟手：形状区域跟着手指整体平移（壳心跟手），里字快速沿格子追上。
  *   - 翻涌：里字以正常随机游走的方式不断涌入移动中的区域。
- *   - 动量：松手后偏置衰减，swarm 自然晃荡、沉淀，而非戛然而止。
+ *   - 动量：松手后偏置衰减、tick 平滑回落常速，swarm 自然晃荡、沉淀。
  *
  * 交互：
  *   拖拽   → 形状跟手 + 内部自由翻涌
@@ -25,9 +26,15 @@ import { GestureRecognizer } from './input/gestures.js';
 
 const CELL_SIZE = 16;
 const FONT_SIZE = 13;
-const CHAR_COUNT = 64;         // every shape is padded to exactly this many cells
-const TICK_MS = 200;           // 固定 tick —— 匀速铁律
+const CHAR_COUNT = 64;         // number of里字 on screen
+const TICK_MS = 200;           // 常速 tick —— 匀速铁律（拖动期由引擎自行提速跟手）
 const SCATTER_RESTORE_MS = 2500;
+// 形状掩码故意比里字数大，留出"空格"。里字填不满掩码 → 像华容道一样有空位
+// 可滑动，整片形状才能持续匀速运动而非成形即冻结。填充率越高越易辨形、越低越
+// 灵动；strict（颜文字/巨字）填得更满保辨形，loose（曲线/花）更松更自由。
+const FILL_RATIO = { strict: 0.82, loose: 0.72 };
+const maskCellsFor = constraint =>
+  Math.max(CHAR_COUNT + 6, Math.round(CHAR_COUNT / (FILL_RATIO[constraint] || 0.75)));
 const CHAR_POOL = '天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏闰余成岁律吕调阳云腾致雨露结为霜'.split('');
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -52,14 +59,14 @@ document.addEventListener('DOMContentLoaded', () => {
   console.log(`PIBT ready — Grid ${gridCols}x${gridRows}, ${CHAR_COUNT} characters`);
 
   // ── Shape catalogue (cycled by double-tap) ────────────────
-  // Every shape is sampled then padded to exactly CHAR_COUNT cells, so each
-  // 里字 owns one cell (bijection): zero roamers, fully-filled glyphs.
+  // 每个形状采样为 `cells` 个掩码格（> CHAR_COUNT），里字只填满其中一部分，
+  // 余下空格供华容道式滑动 —— 这样成形后里字仍持续运动且形状清晰可辨。
   const SHAPES = [
-    { name: '^_^',  constraint: 'strict', make: () => shapes.sampleEmoji('^_^', gridCols, gridRows, CHAR_COUNT) },
-    { name: '心',   constraint: 'strict', make: () => shapes.sampleMegachar('心', gridCols, gridRows, CHAR_COUNT) },
-    { name: '春',   constraint: 'strict', make: () => shapes.sampleMegachar('春', gridCols, gridRows, CHAR_COUNT) },
-    { name: '爱心', constraint: 'loose',  make: () => shapes.sampleCurve('heart', gridCols, gridRows, CHAR_COUNT) },
-    { name: '四叶花', constraint: 'loose', make: () => shapes.sampleCurve('rose', gridCols, gridRows, CHAR_COUNT) },
+    { name: '^_^',  constraint: 'strict', make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
+    { name: '心',   constraint: 'strict', make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
+    { name: '春',   constraint: 'strict', make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
+    { name: '爱心', constraint: 'loose',  make: n => shapes.sampleCurve('heart', gridCols, gridRows, n) },
+    { name: '四叶花', constraint: 'loose', make: n => shapes.sampleCurve('rose', gridCols, gridRows, n) },
   ];
   let shapeIndex = 0;
   let shapeActive = false;
@@ -87,9 +94,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function applyShape(index) {
     shapeIndex = ((index % SHAPES.length) + SHAPES.length) % SHAPES.length;
-    const sampled = SHAPES[shapeIndex].make();
+    const want = maskCellsFor(SHAPES[shapeIndex].constraint);
+    const sampled = SHAPES[shapeIndex].make(want);
     if (!sampled.mask || sampled.mask.length === 0) return;
-    const mask = padMask(sampled.mask, CHAR_COUNT);
+    const mask = padMask(sampled.mask, want);
     currentMask = mask;
     shapeActive = true;
     motion.releaseShape();
@@ -168,8 +176,9 @@ document.addEventListener('DOMContentLoaded', () => {
         strength: Math.max(0.3, Math.min(1, speed / 3)),
       };
 
-      // Region tracks the finger (壳心跟手). Speed stays constant — a fast
-      // drag simply outruns the swarm, which then streams to catch up.
+      // Region tracks the finger (壳心跟手). 拖动期引擎切到更快的固定 tick
+      // (dragTickDuration)，里字沿格子快速追向被拖去的位置 —— 跟手而不迟钝，
+      // 且速度仍是匀速（不随拖拽瞬时速度变化）。
       motion.previewShapeDrag(cumDx, cumDy);
       dragLast = { col, row };
     },
