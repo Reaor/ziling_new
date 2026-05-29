@@ -53,11 +53,16 @@ export class MotionEngine {
     // Shape constraint (per-character, NOT global)
     this._shapeChars = new Set();
     this._shapeMask = null;
+    // 'strict' → 颜文字/巨字 hold formation near anchors (易辨形)
+    // 'loose'  → curves/flowers roam the whole mask freely
+    this._shapeConstraint = 'loose';
     this._shapeDragBaseMask = null;
     this._lastShapeDragShift = { col: 0, row: 0 };
 
     // Drag bias state
-    this.dragBias = null; // { dx: -1|0|1, dy: -1|0|1, strength: 0-1 }
+    this.dragBias = null; // { dx, dy, strength: 0-1 } — dx/dy is a unit-ish direction
+    this._dragMomentum = false; // after release, bias decays instead of dying instantly
+    this.dragMomentumMs = 650;  // time for the post-release "slosh" to settle
   }
 
   /** Public getter/setter bridging _shapeMask for external access */
@@ -165,9 +170,16 @@ export class MotionEngine {
     this._shapeChars.delete(charId); // Release shape constraint
   }
 
-  /** Set the shape mask and constrain all assigned characters */
-  setShapeMask(mask, charIds) {
+  /**
+   * Set the shape mask and constrain all assigned characters.
+   * @param {Array<{x,y}>} mask
+   * @param {number[]} charIds
+   * @param {'strict'|'loose'} [constraint='loose'] — strict holds formation
+   *   (颜文字/巨字, 易辨形); loose lets里字 roam the whole mask (curves/flowers).
+   */
+  setShapeMask(mask, charIds, constraint = 'loose') {
     this._shapeMask = mask;
+    this._shapeConstraint = constraint;
     for (const id of charIds) {
       this._shapeChars.add(id);
     }
@@ -179,6 +191,7 @@ export class MotionEngine {
    * The drag preview shifts the mask target while agents still walk cell-by-cell.
    */
   beginShapeDrag() {
+    this._dragMomentum = false; // a fresh grab cancels any leftover slosh
     if (!this._shapeMask || this._shapeMask.length === 0) {
       this._shapeDragBaseMask = null;
       return false;
@@ -222,8 +235,17 @@ export class MotionEngine {
     return true;
   }
 
+  /**
+   * Release the drag. Instead of killing the bias outright (which makes the
+   * swarm stop dead and looks mechanical), we let it decay over
+   * `dragMomentumMs` so the里字 keep sloshing toward the last drag direction
+   * and settle naturally — the "翻涌" easing out.
+   */
   endShapeDrag() {
     this._shapeDragBaseMask = null;
+    this._dragMomentum = this.dragBias != null && this.dragBias.strength > 0;
+    // Strict shapes re-form at the dragged location once the slosh decays.
+    if (this._shapeConstraint === 'strict') this._reanchorToMask();
   }
 
   /** Release all shape constraints */
@@ -234,6 +256,16 @@ export class MotionEngine {
   }
 
   update(deltaTime) {
+    // Post-release momentum: let the drag bias fade so the swarm eases out
+    // instead of freezing the instant the finger lifts.
+    if (this._dragMomentum && this.dragBias) {
+      this.dragBias.strength -= deltaTime / this.dragMomentumMs;
+      if (this.dragBias.strength <= 0.02) {
+        this.dragBias = null;
+        this._dragMomentum = false;
+      }
+    }
+
     this.accumulatedTime += deltaTime;
     let ticks = 0;
     while (this.accumulatedTime >= this.tickDuration && ticks < 3) {
@@ -409,29 +441,39 @@ export class MotionEngine {
       }
     }
 
-    // Sort: target direction (TOP when active) > direction persistence > repulsion
+    // Sort priority depends on whether the character is pursuing a target.
     const changeThreshold = 15 + Math.floor(Math.random() * 15);
     const forceChange = streak > changeThreshold;
     const hasTarget = target !== undefined;
 
     cands.sort((a, b) => {
+      if (hasTarget) {
+        // Distance to target leads. "stay" (dist 0 when AT target) therefore
+        // wins naturally → strict里字 hold their anchor instead of drifting.
+        const aD = Math.abs(a.x - target.tx) + Math.abs(a.y - target.ty);
+        const bD = Math.abs(b.x - target.tx) + Math.abs(b.y - target.ty);
+        if (aD !== bD) return aD - bD;
+        // Equal progress → keep heading the same way (long纵横 segments, L29).
+        if (curDir) {
+          const aSame = !a.stay && a.dx === curDir.dx && a.dy === curDir.dy;
+          const bSame = !b.stay && b.dx === curDir.dx && b.dy === curDir.dy;
+          if (aSame !== bSame) return aSame ? -1 : 1;
+        }
+        if (a.repulsion !== b.repulsion) return b.repulsion - a.repulsion;
+        return 0;
+      }
+
+      // ── Target-less wander: keep moving, persist direction for liveliness ──
       if (a.stay && !b.stay) return 1;
       if (!a.stay && b.stay) return -1;
       if (a.stay && b.stay) return 0;
 
-      // When a character has a specific target → target direction is TOP priority
-      if (hasTarget) {
-        const aDist = Math.abs(a.x - target.tx) + Math.abs(a.y - target.ty);
-        const bDist = Math.abs(b.x - target.tx) + Math.abs(b.y - target.ty);
-        if (aDist !== bDist) return aDist - bDist;
-      }
-
-      if (curDir && !hasTarget) {
+      if (curDir) {
         const aSame = a.dx === curDir.dx && a.dy === curDir.dy;
         const bSame = b.dx === curDir.dx && b.dy === curDir.dy;
         const aOpposite = a.dx === -curDir.dx && a.dy === -curDir.dy;
         const bOpposite = b.dx === -curDir.dx && b.dy === -curDir.dy;
-        
+
         if (!forceChange) {
           if (aSame && !bSame) return -1;
           if (!aSame && bSame) return 1;
@@ -447,7 +489,6 @@ export class MotionEngine {
         }
       }
 
-      // Repulsion breaks ties
       if (a.repulsion !== b.repulsion) return b.repulsion - a.repulsion;
       return 0;
     });
@@ -493,6 +534,16 @@ export class MotionEngine {
   _assignWanderTarget(char) {
     // Shape-constrained: pick from mask, biased toward drag if active
     if (this._shapeChars.has(char.id) && this._shapeMask && this._shapeMask.length > 0) {
+      const dragging = this.dragBias && this.dragBias.strength > 0.2;
+
+      // Strict + idle → permanently target the anchor (颜文字/巨字 易辨形).
+      // The distance-led sort makes a char that has arrived simply hold.
+      // While dragging, fall through to the broad/surge picker so it 翻涌.
+      if (this._shapeConstraint === 'strict' && !dragging) {
+        this._wanderTargets.set(char.id, { tx: char.anchorX, ty: char.anchorY });
+        return;
+      }
+
       const candidates = [];
       for (const c of this._shapeMask) {
         if (c.x === char.gridX && c.y === char.gridY) continue;
@@ -596,27 +647,50 @@ export class MotionEngine {
   _assignShapeTargets() {
     if (!this._shapeMask || this._shapeMask.length === 0) return;
 
+    // Sorted (row-major) assignment: matching里字 and cells in the same spatial
+    // order fans the swarm out with far fewer path crossings than greedy-nearest,
+    // so strict formations actually converge tight instead of jamming.
+    const chars = [...this._shapeChars]
+      .map(id => this.characters.get(id))
+      .filter(Boolean)
+      .sort((a, b) => (a.gridY - b.gridY) || (a.gridX - b.gridX));
+    const cells = this._shapeMask.slice()
+      .sort((a, b) => (a.y - b.y) || (a.x - b.x));
+
+    const n = Math.min(chars.length, cells.length);
+    for (let i = 0; i < n; i++) {
+      const char = chars[i];
+      const cell = cells[i];
+      this._wanderTargets.set(char.id, { tx: cell.x, ty: cell.y });
+      char.anchorX = cell.x; // formation slot — strict shapes hold here
+      char.anchorY = cell.y;
+      this._stuckTicks.set(char.id, 0);
+    }
+  }
+
+  /**
+   * Re-bind each里字's anchor to the nearest cell of the CURRENT mask without
+   * forcing an immediate move. Called on drag release so a strict shape settles
+   * back into form at wherever the finger left it (the "翻涌" easing into shape).
+   */
+  _reanchorToMask() {
+    if (!this._shapeMask || this._shapeMask.length === 0) return;
     const used = new Set();
     for (const id of this._shapeChars) {
       const char = this.characters.get(id);
       if (!char) continue;
-
       let best = null;
-      let bestScore = Infinity;
+      let bestD = Infinity;
       for (const cell of this._shapeMask) {
         const key = this.grid.getCellKey(cell.x, cell.y);
         if (used.has(key)) continue;
-        const dist = Math.abs(cell.x - char.gridX) + Math.abs(cell.y - char.gridY);
-        if (dist < bestScore) {
-          best = cell;
-          bestScore = dist;
-        }
+        const d = Math.abs(cell.x - char.gridX) + Math.abs(cell.y - char.gridY);
+        if (d < bestD) { best = cell; bestD = d; }
       }
-
       if (best) {
         used.add(this.grid.getCellKey(best.x, best.y));
-        this._wanderTargets.set(id, { tx: best.x, ty: best.y });
-        this._stuckTicks.set(id, 0);
+        char.anchorX = best.x;
+        char.anchorY = best.y;
       }
     }
   }

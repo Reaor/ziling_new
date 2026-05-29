@@ -1,29 +1,37 @@
 /**
  * Shape System for ZiLing (字灵)
  *
- * Handles shape templates and sampling — converting abstract shapes
- * (emoji expressions, giant characters, parametric curves) into grid cell
- * coordinate masks for the Ziling grid engine.
+ * Converts abstract shapes (颜文字 expressions, 巨字 giant characters,
+ * parametric curves) into grid-cell coordinate masks for the里字 engine.
  *
- * All sampling uses off-screen Canvas 2D → getImageData → grid mapping.
+ * Sampling pipeline (v2 — high-resolution):
+ *   1) Render the shape onto a SUPERSAMPLED off-screen canvas
+ *      (cols·SS × rows·SS) so glyph detail survives.
+ *   2) Fit the glyph to the grid box (measureText) so nothing is clipped.
+ *   3) Downsample: a grid cell is "on" when its SS×SS block is covered
+ *      past a threshold.
+ *   4) Sparsify evenly to at most `maxChars` cells.
+ *
+ * The old version rasterised at 1px-per-cell, which smeared颜文字/巨字 into
+ * unreadable blobs and clipped wide emoji — this fixes both (辨形清晰).
  *
  * Shape constraint levels:
- *   'strict'   — cells must stay on mask exactly (emoji, megachar)
- *   'moderate' — slight drift allowed (reserved for future)
- *   'loose'    — mask is a loose suggestion (curves)
+ *   'strict' — 颜文字 / 巨字, hold formation (易辨形)
+ *   'loose'  — curves / flowers, roam freely
  *
  * @module shape
  * @license MIT
  */
+
+const FONT_STACK = '"PingFang SC", "Microsoft YaHei", "Heiti SC", sans-serif';
+const SS = 6; // supersample factor per grid cell
 
 /* ================================================================
  *  SHAPE TEMPLATE DATA
  * ================================================================ */
 
 /**
- * Emoji expression templates with anatomy regions.
- * Each entry maps an emoji key to its mood classification, eye character
- * pairs, mouth character, and supported micro-expression animations.
+ * 颜文字 expression templates with anatomy regions.
  */
 export const EMOJI_TEMPLATES = {
   '^_^':   { mood:'happy',      eyes:['^','^'],  mouth:'_', micro:['blink','breath'] },
@@ -44,7 +52,6 @@ export const EMOJI_TEMPLATES = {
 
 /**
  * Non-emoji shape type identifiers.
- * Used as the `type` parameter to `sampleCurve()` and for shape dispatch.
  */
 export const SHAPE_TYPES = {
   MEGACHAR: 'megachar',
@@ -59,108 +66,74 @@ export const SHAPE_TYPES = {
  *  SHAPE SYSTEM
  * ================================================================ */
 
-/**
- * Converts abstract shapes into discrete grid cell masks.
- *
- * All sampling methods follow the same pipeline:
- *   1) Create off-screen canvas sized to the grid.
- *   2) Draw the shape at large scale, centred.
- *   3) Extract non-transparent pixels via getImageData.
- *   4) Optionally sparsify to meet `maxChars` limit.
- *   5) Store mask + constraint level on the instance.
- */
 export class ShapeSystem {
   constructor() {
-    /** @type {string|null} Currently active shape key */
+    /** @type {string|null} */
     this.currentShape = null;
-    /** @type {Array<{x:number, y:number}>} Allowed grid cells */
+    /** @type {Array<{x:number, y:number}>} */
     this.currentMask = [];
-    /**
-     * How strictly agents must adhere to the mask.
-     * @type {'strict'|'moderate'|'loose'}
-     */
+    /** @type {'strict'|'moderate'|'loose'} */
     this.constraintType = 'loose';
   }
 
   /* ----------------------------------------------------------
-   *  EMOJI SAMPLING
+   *  颜文字 SAMPLING
    * ---------------------------------------------------------- */
 
   /**
-   * Sample an emoji expression into a grid mask.
-   *
-   * Renders the emoji key string onto an off-screen canvas, then maps
-   * non-transparent pixels to grid coordinates.
-   *
-   * @param {string}  emojiKey — key from {@link EMOJI_TEMPLATES} (e.g. '^_^')
-   * @param {number}  gridCols — grid width in cells
-   * @param {number}  gridRows — grid height in cells
-   * @param {number}  [maxChars=80] — max number of target cells
-   * @returns {{ mask: Array<{x:number, y:number}>, constraint: 'strict' }}
+   * Sample a颜文字 expression into a grid mask.
+   * @param {string} emojiKey — key from {@link EMOJI_TEMPLATES} (e.g. '^_^')
+   * @param {number} gridCols
+   * @param {number} gridRows
+   * @param {number} [maxChars=80]
+   * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
   sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 80) {
-    const offCanvas = new OffscreenCanvas(gridCols, gridRows);
-    const ctx = offCanvas.getContext('2d');
+    const text = EMOJI_TEMPLATES[emojiKey] ? emojiKey : '^_^';
+    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.10, (ctx, W, H) => {
+      // 颜文字 are wide and short — fit mostly by width, keep a short band.
+      const fs = this._fitFont(ctx, text, W * 0.94, H * 0.6);
+      ctx.font = `${fs}px ${FONT_STACK}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(text, W / 2, H / 2);
+    });
 
-    // Render expression string large and centered
-    const fontSize = Math.floor(gridRows * 0.55);
-    ctx.font = `${fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#ffffff';
-
-    const template = EMOJI_TEMPLATES[emojiKey];
-    const text = template ? emojiKey : '^_^';
-    ctx.fillText(text, gridCols / 2, gridRows / 2);
-
-    const pixels = this._extractPixels(offCanvas, gridCols, gridRows, maxChars);
-
-    this.currentMask = pixels;
+    this.currentMask = mask;
     this.currentShape = emojiKey;
     this.constraintType = 'strict';
-    return { mask: pixels, constraint: 'strict' };
+    return { mask, constraint: 'strict' };
   }
 
   /* ----------------------------------------------------------
-   *  MEGACHAR SAMPLING (giant Chinese character)
+   *  巨字 SAMPLING (giant Chinese character)
    * ---------------------------------------------------------- */
 
   /**
-   * Sample a giant Chinese character into a grid mask.
-   *
-   * Supports optional vertical orientation via Canvas rotation.
-   *
-   * @param {string}  char       — single Chinese character to render
-   * @param {number}  gridCols   — grid width in cells
-   * @param {number}  gridRows   — grid height in cells
-   * @param {number}  [maxChars=100] — max number of target cells
-   * @param {'horizontal'|'vertical'} [direction='horizontal'] — text orientation
-   * @returns {{ mask: Array<{x:number, y:number}>, constraint: 'strict' }}
+   * Sample a 巨字 (single giant Chinese character) into a grid mask.
+   * @param {string} char
+   * @param {number} gridCols
+   * @param {number} gridRows
+   * @param {number} [maxChars=100]
+   * @param {'horizontal'|'vertical'} [direction='horizontal'] — reserved for
+   *   multi-char 巨字 stacking; a single char always renders upright.
+   * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
   sampleMegachar(char, gridCols, gridRows, maxChars = 100, direction = 'horizontal') {
-    const offCanvas = new OffscreenCanvas(gridCols, gridRows);
-    const ctx = offCanvas.getContext('2d');
+    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.14, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, char, W * 0.9, H * 0.9);
+      ctx.font = `${fs}px ${FONT_STACK}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(char, W / 2, H / 2);
+    });
 
-    const fontSize = Math.min(gridCols, gridRows) * 0.85;
-    ctx.font = `${fontSize}px "PingFang SC", "Microsoft YaHei", sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#ffffff';
-
-    if (direction === 'vertical') {
-      ctx.translate(gridCols / 2, gridRows / 2);
-      ctx.rotate(-Math.PI / 2);
-      ctx.fillText(char, 0, 0);
-    } else {
-      ctx.fillText(char, gridCols / 2, gridRows / 2);
-    }
-
-    const pixels = this._extractPixels(offCanvas, gridCols, gridRows, maxChars);
-
-    this.currentMask = pixels;
+    this.currentMask = mask;
     this.currentShape = char;
     this.constraintType = 'strict';
-    return { mask: pixels, constraint: 'strict' };
+    return { mask, constraint: 'strict' };
   }
 
   /* ----------------------------------------------------------
@@ -169,86 +142,61 @@ export class ShapeSystem {
 
   /**
    * Sample a mathematical curve shape into a grid mask.
-   *
-   * Supported types:
-   *   'rose'  — r = cos(2θ) four-petal rose curve
-   *   'heart' — parametric heart curve
-   *   (any other value falls back to a plain circle)
-   *
-   * @param {string}  type      — curve type identifier
-   * @param {number}  gridCols  — grid width in cells
-   * @param {number}  gridRows  — grid height in cells
-   * @param {number}  [maxChars=60] — max number of target cells
-   * @returns {{ mask: Array<{x:number, y:number}>, constraint: 'loose' }}
+   * Supported: 'rose' (r=cos2θ), 'heart'; anything else → circle.
+   * @param {string} type
+   * @param {number} gridCols
+   * @param {number} gridRows
+   * @param {number} [maxChars=60]
+   * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'loose' }}
    */
   sampleCurve(type, gridCols, gridRows, maxChars = 60) {
-    const offCanvas = new OffscreenCanvas(gridCols, gridRows);
-    const ctx = offCanvas.getContext('2d');
-    const cx = gridCols / 2;
-    const cy = gridRows / 2;
+    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.06, (ctx, W, H) => {
+      const cx = W / 2;
+      const cy = H / 2;
+      const scale = Math.min(W, H) * 0.42;
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = SS * 1.3; // ≈ one grid cell wide after downsample
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
 
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
+      switch (type) {
+        case 'rose':
+          for (let t = 0; t <= Math.PI * 2 + 0.02; t += 0.01) {
+            const r = Math.cos(2 * t) * scale;
+            const x = cx + r * Math.cos(t);
+            const y = cy + r * Math.sin(t);
+            if (t === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          break;
+        case 'heart':
+          for (let t = 0; t <= Math.PI * 2 + 0.02; t += 0.01) {
+            const x = cx + 16 * Math.pow(Math.sin(t), 3) * (scale / 18);
+            const y = cy - (13 * Math.cos(t) - 5 * Math.cos(2 * t)
+                            - 2 * Math.cos(3 * t) - Math.cos(4 * t)) * (scale / 18);
+            if (t === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          break;
+        default:
+          ctx.arc(cx, cy, scale, 0, Math.PI * 2);
+          break;
+      }
+      ctx.stroke();
+    });
 
-    const scale = Math.min(gridCols, gridRows) * 0.4;
-
-    switch (type) {
-      case 'rose':
-        // Four-petal rose: r = cos(2θ)
-        for (let t = 0; t < Math.PI * 2; t += 0.02) {
-          const r = Math.cos(2 * t) * scale;
-          const x = cx + r * Math.cos(t);
-          const y = cy + r * Math.sin(t);
-          if (t === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        break;
-
-      case 'heart':
-        // Parametric heart curve
-        for (let t = 0; t < Math.PI * 2; t += 0.02) {
-          const x = cx + 16 * Math.pow(Math.sin(t), 3) * (scale / 20);
-          const y = cy - (13 * Math.cos(t) - 5 * Math.cos(2 * t)
-                          - 2 * Math.cos(3 * t) - Math.cos(4 * t)) * (scale / 20);
-          if (t === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
-        }
-        break;
-
-      default:
-        ctx.arc(cx, cy, scale, 0, Math.PI * 2);
-        break;
-    }
-
-    ctx.stroke();
-
-    const pixels = this._extractPixels(offCanvas, gridCols, gridRows, maxChars);
-
-    this.currentMask = pixels;
+    this.currentMask = mask;
     this.currentShape = type;
     this.constraintType = 'loose';
-    return { mask: pixels, constraint: 'loose' };
+    return { mask, constraint: 'loose' };
   }
 
   /* ----------------------------------------------------------
    *  MASK QUERIES
    * ---------------------------------------------------------- */
 
-  /**
-   * Return the current shape's allowed grid cell mask.
-   * @returns {Array<{x:number, y:number}>}
-   */
   getCurrentMask() {
     return this.currentMask;
   }
 
-  /**
-   * Check whether a grid cell coordinate lies within the current shape mask.
-   * @param {number} x — grid column
-   * @param {number} y — grid row
-   * @returns {boolean}
-   */
   isInShape(x, y) {
     return this.currentMask.some(p => p.x === x && p.y === y);
   }
@@ -258,36 +206,67 @@ export class ShapeSystem {
    * ---------------------------------------------------------- */
 
   /**
-   * Extract non-transparent pixels from an off-screen canvas and
-   * optionally sparsify to a maximum count.
-   *
+   * Choose a font size (px) that fits `text` inside (maxW × maxH).
    * @private
-   * @param {OffscreenCanvas} offCanvas — pre-rendered canvas
-   * @param {number}          cols      — pixel width
-   * @param {number}          rows      — pixel height
-   * @param {number}          maxChars  — upper bound for cells
-   * @returns {Array<{x:number, y:number}>}
    */
-  _extractPixels(offCanvas, cols, rows, maxChars) {
-    const imageData = offCanvas.getContext('2d').getImageData(0, 0, cols, rows);
-    const data = imageData.data;
-    let pixels = [];
+  _fitFont(ctx, text, maxW, maxH) {
+    let fs = maxH;
+    ctx.font = `${fs}px ${FONT_STACK}`;
+    const w = ctx.measureText(text).width || 1;
+    if (w > maxW) fs *= maxW / w;
+    return Math.max(4, Math.floor(fs));
+  }
 
-    for (let y = 0; y < rows; y++) {
-      for (let x = 0; x < cols; x++) {
-        const idx = (y * cols + x) * 4;
-        if (data[idx + 3] > 100) { // alpha > 100 → non-transparent
-          pixels.push({ x, y });
+  /**
+   * Render `drawFn` onto a supersampled canvas, then downsample to a grid mask.
+   * A grid cell is "on" when its SS×SS pixel block is covered past `threshold`.
+   * @private
+   * @param {number} cols
+   * @param {number} rows
+   * @param {number} maxChars
+   * @param {number} threshold — 0..1 coverage needed to light a cell
+   * @param {(ctx:OffscreenCanvasRenderingContext2D, W:number, H:number)=>void} drawFn
+   * @returns {Array<{x:number,y:number}>}
+   */
+  _rasterToMask(cols, rows, maxChars, threshold, drawFn) {
+    const W = cols * SS;
+    const H = rows * SS;
+    const off = new OffscreenCanvas(W, H);
+    const ctx = off.getContext('2d', { willReadFrequently: true });
+    ctx.clearRect(0, 0, W, H);
+    drawFn(ctx, W, H);
+
+    const data = ctx.getImageData(0, 0, W, H).data;
+    const need = Math.max(1, Math.round((SS * SS) * threshold));
+    const cells = [];
+    for (let gy = 0; gy < rows; gy++) {
+      for (let gx = 0; gx < cols; gx++) {
+        let on = 0;
+        const baseX = gx * SS;
+        const baseY = gy * SS;
+        for (let py = 0; py < SS; py++) {
+          const rowOff = (baseY + py) * W;
+          for (let px = 0; px < SS; px++) {
+            if (data[((rowOff + baseX + px) << 2) + 3] > 100) {
+              if (++on >= need) { py = SS; break; } // early-out once lit
+            }
+          }
         }
+        if (on >= need) cells.push({ x: gx, y: gy });
       }
     }
+    return this._sparsify(cells, maxChars);
+  }
 
-    // Sparse sampling if we have more pixels than allowed
-    if (pixels.length > maxChars) {
-      const step = Math.ceil(pixels.length / maxChars);
-      pixels = pixels.filter((_, i) => i % step === 0);
-    }
-
-    return pixels;
+  /**
+   * Evenly thin `cells` down to at most `maxChars`, preserving spatial spread.
+   * @private
+   */
+  _sparsify(cells, maxChars) {
+    if (cells.length <= maxChars) return cells;
+    const step = cells.length / maxChars;
+    const out = [];
+    for (let i = 0; i < maxChars; i++) out.push(cells[Math.floor(i * step)]);
+    return out;
   }
 }
