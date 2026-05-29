@@ -115,6 +115,8 @@ export class MotionEngine {
     this._stuckTicks.delete(charId);
     this._moveStartTimes.delete(charId);
     this._shapeChars.delete(charId);
+    this._flowOf.delete(charId);
+    this._orbitOf.delete(charId);
   }
 
   /** Set a specific wander target (for shape transitions) */

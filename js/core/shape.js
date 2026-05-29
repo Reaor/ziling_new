@@ -89,16 +89,17 @@ export class ShapeSystem {
    * @param {number} [maxChars=80]
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
-  sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 96) {
+  sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 84) {
     const text = EMOJI_TEMPLATES[emojiKey] ? emojiKey : '^_^';
-    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.075, (ctx, W, H) => {
-      // 颜文字 are wide and short — fit mostly by width, keep a short band.
-      // 用加粗字体 + 细描边来取样，让"_ ﹏ ."这类窄嘴在下采样后不至于缩成一根线。
-      const fs = this._fitFont(ctx, text, W * 0.96, H * 0.68);
-      this._drawTextMask(ctx, text, W / 2, H / 2, fs, {
-        weight: 700,
-        strokeWidth: Math.max(SS * 0.45, fs * 0.035),
-      });
+    // 颜文字重在辨形：眼/嘴要分明、笔画要**细**（之前加粗+描边导致糊成一团）。
+    // 用正常字重、不描边、阈值偏高 → 只点亮笔画核心，眼嘴清爽可辨。
+    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.18, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, text, W * 0.90, H * 0.52);
+      ctx.font = `${fs}px ${FONT_STACK}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(text, W / 2, H / 2);
     });
 
     this.currentMask = mask;

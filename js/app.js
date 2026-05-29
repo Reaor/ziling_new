@@ -28,18 +28,23 @@ const CELL_SIZE = 16;
 const FONT_SIZE = 13;
 const TICK_MS = 200;           // 常速 tick —— 匀速铁律（拖动期由引擎自行提速跟手）
 const SCATTER_RESTORE_MS = 2500;
-const FADE_MS = 600;           // 里字自适应增减时的淡入/淡出时长
+// 里字自适应 = 螺旋淡入/淡出（沿几条螺旋臂一个接一个，向内淡入/向外淡出）。
+const SPIRAL_ARMS = 4;         // 几条螺旋臂（均匀分布的几个方向）
+const SPIRAL_MS = 950;         // 单个里字飞入/飞出时长
+const SPIRAL_STAGGER_MS = 70;  // 同臂相邻里字的出发间隔（形成"一个接一个"队列）
+const SPIRAL_TURNS = 0.7;      // 螺旋缠绕圈数
 const INITIAL_CHARS = 56;      // 首屏播种数（之后随形状自适应增减）
 const MIN_CHARS = 28;
 const MAX_CHARS = 156;
-// 流动呈现：里字沿路径流动，约填满路径总格数的 FLOW_FILL，余下为流动所需空位。
-// 空位越多越灵动（字更明显地动）、越少越实心。偏低取值优先"全员在动"（用户反馈
-// 不要静止），靠加粗描边采样保证辨形。所有动态形状里字持续运动、速率一致。
-const FLOW_FILL = 0.74;
+// 流动呈现：里字沿路径流动，按形态分别控制填充率。
+//  - 闭环曲线(心形/花)：近乎全覆盖，线条才连续不断（用户反馈"曲线没被全覆盖"）。
+//  - 开放笔画(颜文字/巨字)：留更多空位 → 传送带推得动、更灵动（不要静止）。
+const FLOW_FILL_LOOP = 0.95;
+const FLOW_FILL_STROKE = 0.70;
 // 微动：点击时随点击反应触发的一次性"轻摆"脉冲（全体一起做、随后衰减），
 // 不常驻（常驻会很乱）。MICRO_AMP=幅度(px)，MICRO_DECAY_MS=衰减时长。
-const MICRO_AMP = 3.0;
-const MICRO_DECAY_MS = 520;
+const MICRO_AMP = 5.5;
+const MICRO_DECAY_MS = 700;
 const BREAK_PROB = 0.3;        // 点击概率打破轮廓（里字散成自由云团再归位）
 const BREAK_RESTORE_MS = 1600;
 const CHAR_POOL = '天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏闰余成岁律吕调阳云腾致雨露结为霜'.split('');
@@ -84,93 +89,123 @@ document.addEventListener('DOMContentLoaded', () => {
   let shapeActive = false;
   let currentPaths = null; // 当前形状的路径（散开/打断/松手后据此归位）
 
-  // ── 里字自适应（增生/减少以适应形状大小，收束 L4）──────────
-  // fadeTarget===0 的里字正在淡出回收，不计入"在册"里字。
-  const aliveChars = () => pool.getAll().filter(c => c.fadeTarget !== 0);
+  // ── 里字自适应 = 螺旋淡入/淡出（显示层动画，绕开 PIBT，收束 L4）──────────
+  // 新增/消失的里字沿 SPIRAL_ARMS 条螺旋臂"一个接一个"整齐排列：向内运动=淡入
+  // （到达字形后并入流动），向外运动=淡出（到外圈后回收）。比"原地统一浮现"耐看。
+  const transit = [];            // 进行中的螺旋 agent
+  const transitIds = new Set();  // 正在螺旋过渡的里字 id（不计入在册 / 不参与流动）
+  let reformPending = false;     // 过渡批次结束后重排一次流动（均匀覆盖）
+  const ease = t => t * t * (3 - 2 * t);
+
+  // "在册"里字 = 已成形参与流动的（排除正在螺旋过渡的）。
+  const aliveChars = () => pool.getAll().filter(c => !transitIds.has(c.id));
   const aliveIds = () => aliveChars().map(c => c.id);
 
-  // 让新里字在**当前字形内部/轮廓附近**就地淡入浮现（更丝滑），而不是从画布两侧
-  // 排队走进来。优先字形内空格，其次轮廓外一格的"气泡层"，再兜底随机空格。
-  function spawnEmergentChar(mask = []) {
-    const candidates = [];
-    const seen = new Set();
-    const push = (x, y) => {
-      if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) return;
-      const key = grid.getCellKey(x, y);
-      if (seen.has(key) || grid.isOccupied(x, y)) return;
-      seen.add(key);
-      candidates.push([x, y]);
-    };
-    for (const c of mask) push(c.x, c.y);
+  function shapeCenterPx(mask) {
+    let cx = 0, cy = 0;
+    for (const c of mask) { cx += c.x; cy += c.y; }
+    const n = mask.length || 1;
+    return { x: (cx / n + 0.5) * CELL_SIZE, y: (cy / n + 0.5) * CELL_SIZE };
+  }
+  function shapeRadiusPx(mask, center) {
+    let maxd = CELL_SIZE * 2;
     for (const c of mask) {
-      push(c.x + 1, c.y); push(c.x - 1, c.y);
-      push(c.x, c.y + 1); push(c.x, c.y - 1);
+      const dx = (c.x + 0.5) * CELL_SIZE - center.x, dy = (c.y + 0.5) * CELL_SIZE - center.y;
+      maxd = Math.max(maxd, Math.hypot(dx, dy));
     }
-    if (candidates.length === 0) {
-      for (let a = 0; a < 80; a++) push((Math.random() * gridCols) | 0, (Math.random() * gridRows) | 0);
+    return maxd;
+  }
+  // 离 (gx,gy) 最近的、未被占用的字形格（让飞入的字就近落位，不跳来跳去）。
+  function closestFreeMaskCell(mask, gx, gy) {
+    let best = null, bestD = Infinity;
+    for (const c of mask) {
+      if (grid.isOccupied(c.x, c.y)) continue;
+      const d = (c.x - gx) ** 2 + (c.y - gy) ** 2;
+      if (d < bestD) { bestD = d; best = [c.x, c.y]; }
     }
-    if (candidates.length === 0) return null;
-    const cell = candidates[(Math.random() * candidates.length) | 0];
-    const c = pool.acquire(nextGlyph(), cell[0], cell[1]);
-    c.alpha = 0;       // 原地淡入：alpha 0→1，由 stepFades 推进
-    c.fadeTarget = 1;
-    motion.registerCharacter(c);
-    return c;
+    return best;
   }
 
-  // 里字淡出时给它一个最近边缘的目标，让它漂出画布再回收。
-  function edgeTargetFor(c) {
-    const left = c.gridX, right = gridCols - 1 - c.gridX;
-    const top = c.gridY, bottom = gridRows - 1 - c.gridY;
-    const m = Math.min(left, right, top, bottom);
-    if (m === left) return [0, c.gridY];
-    if (m === right) return [gridCols - 1, c.gridY];
-    if (m === top) return [c.gridX, 0];
-    return [c.gridX, gridRows - 1];
+  // 增字：沿螺旋臂向内淡入。rank 让同臂里字错峰出发 → 排成"一个接一个"的队列。
+  function spawnSpiralIn(count, mask) {
+    const center = shapeCenterPx(mask);
+    const rIn = Math.max(CELL_SIZE * 2, shapeRadiusPx(mask, center) * 0.5);
+    const rOut = rIn + CELL_SIZE * 9;
+    for (let k = 0; k < count; k++) {
+      const arm = k % SPIRAL_ARMS, rank = Math.floor(k / SPIRAL_ARMS);
+      const c = pool.acquire(nextGlyph(), 0, 0);
+      c.alpha = 0;
+      transitIds.add(c.id);
+      transit.push({ char: c, mode: 'in', center, rIn, rOut, mask,
+        base: (arm / SPIRAL_ARMS) * Math.PI * 2,
+        elapsed: -rank * SPIRAL_STAGGER_MS, dur: SPIRAL_MS });
+    }
   }
 
-  // 调整在册里字数到 target：不足则边缘淡入，过多则淡出离场（挑离形状中心最远者）。
+  // 减字：挑离中心最远的里字，沿螺旋臂向外淡出后回收。
+  function despawnSpiralOut(count, mask) {
+    const center = shapeCenterPx(mask);
+    const rIn = Math.max(CELL_SIZE * 2, shapeRadiusPx(mask, center) * 0.5);
+    const rOut = rIn + CELL_SIZE * 9;
+    const victims = aliveChars()
+      .map(c => ({ c, d: (c.displayX - center.x) ** 2 + (c.displayY - center.y) ** 2 }))
+      .sort((a, b) => b.d - a.d).slice(0, count).map(o => o.c);
+    victims.forEach((c, k) => {
+      const arm = k % SPIRAL_ARMS, rank = Math.floor(k / SPIRAL_ARMS);
+      transitIds.add(c.id);
+      motion.unregisterCharacter(c.id); // 退出 PIBT，腾出格子
+      transit.push({ char: c, mode: 'out', center, rIn, rOut, mask,
+        base: (arm / SPIRAL_ARMS) * Math.PI * 2,
+        elapsed: -rank * SPIRAL_STAGGER_MS, dur: SPIRAL_MS });
+    });
+    if (victims.length) reformPending = true;
+  }
+
   function adaptCharCount(target, mask) {
     target = Math.max(MIN_CHARS, Math.min(MAX_CHARS, target));
-    const alive = aliveChars();
-    const diff = target - alive.length;
-    if (diff > 0) {
-      for (let k = 0; k < diff; k++) spawnEmergentChar(mask);
-    } else if (diff < 0) {
-      let cx = 0, cy = 0;
-      for (const cell of mask) { cx += cell.x; cy += cell.y; }
-      cx /= mask.length; cy /= mask.length;
-      const victims = alive
-        .map(c => ({ c, d: (c.gridX - cx) ** 2 + (c.gridY - cy) ** 2 }))
-        .sort((a, b) => b.d - a.d)
-        .slice(0, -diff)
-        .map(o => o.c);
-      for (const c of victims) {
-        c.fadeTarget = 0;
-        motion.freeFromShape(c.id);
-        const [tx, ty] = edgeTargetFor(c);
-        motion.setTarget(c.id, tx, ty);
-      }
-    }
+    const diff = target - aliveChars().length;
+    if (diff > 0) spawnSpiralIn(diff, mask);
+    else if (diff < 0) despawnSpiralOut(-diff, mask);
   }
 
-  // 推进淡入/淡出；淡出至 0 的里字回收。每帧调用。
-  function stepFades(dtMs) {
-    const rate = dtMs / FADE_MS;
-    for (const c of pool.getAll()) {
-      if (c.alpha < c.fadeTarget) {
-        c.alpha = Math.min(c.fadeTarget, c.alpha + rate);
-      } else if (c.alpha > c.fadeTarget) {
-        c.alpha = Math.max(c.fadeTarget, c.alpha - rate);
-        if (c.fadeTarget === 0 && c.alpha <= 0.02) {
-          motion.unregisterCharacter(c.id);
-          pool.release(c.id);
-        }
+  // 每帧推进螺旋 agent：设 displayX/Y + alpha；到点则并入流动 / 回收。
+  function updateSpirals(dtMs) {
+    if (transit.length === 0) return;
+    for (let i = transit.length - 1; i >= 0; i--) {
+      const a = transit[i];
+      a.elapsed += dtMs;
+      const p = Math.max(0, Math.min(1, a.elapsed / a.dur));
+      // 向内：r 从 rOut→rIn、alpha 0→1；向外：r 从 rIn→rOut、alpha 1→0。
+      const rr = a.mode === 'in'
+        ? a.rOut + (a.rIn - a.rOut) * ease(p)
+        : a.rIn + (a.rOut - a.rIn) * ease(p);
+      const theta = a.base + SPIRAL_TURNS * Math.PI * 2 * (1 - (rr - a.rIn) / (a.rOut - a.rIn));
+      a.char.displayX = a.center.x + rr * Math.cos(theta) - CELL_SIZE / 2;
+      a.char.displayY = a.center.y + rr * Math.sin(theta) - CELL_SIZE / 2;
+      a.char.alpha = a.mode === 'in' ? p : (1 - p);
+      if (p >= 1) {
+        if (a.mode === 'in') finalizeSpiralIn(a);
+        else pool.release(a.char.id);
+        transitIds.delete(a.char.id);
+        transit.splice(i, 1);
       }
     }
+    if (transit.length === 0 && reformPending) { reformPending = false; reformShape(); }
   }
 
-  const pathsCellCount = paths => paths.reduce((s, p) => s + p.cells.length, 0);
+  // 螺旋飞入到点 → 落进字形最近空格、注册进引擎，待批次结束并入流动。
+  function finalizeSpiralIn(a) {
+    const cgx = Math.max(0, Math.min(gridCols - 1, Math.round(a.char.displayX / CELL_SIZE)));
+    const cgy = Math.max(0, Math.min(gridRows - 1, Math.round(a.char.displayY / CELL_SIZE)));
+    const shapeCells = currentPaths ? currentPaths.flatMap(p => p.cells) : a.mask;
+    const cell = closestFreeMaskCell(a.mask, cgx, cgy) || closestFreeMaskCell(shapeCells, cgx, cgy);
+    const gx = cell ? cell[0] : cgx;
+    const gy = cell ? cell[1] : cgy;
+    a.char.gridX = gx; a.char.gridY = gy; a.char.prevGridX = gx; a.char.prevGridY = gy;
+    a.char.alpha = 1;
+    motion.registerCharacter(a.char);
+    reformPending = true;
+  }
 
   // 用当前形状的路径把在册里字约束成"流动呈现"。散开/打断/松手后归位都用它。
   function formCurrent() {
@@ -187,9 +222,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!paths || paths.length === 0) return;
     currentPaths = paths;
     shapeActive = true;
-    // 里字数随形状路径总格数自适应：约填满 FLOW_FILL，余下为流动所需空位（收束 L33）。
-    const total = pathsCellCount(paths);
-    const target = Math.max(MIN_CHARS, Math.min(MAX_CHARS, Math.round(total * FLOW_FILL)));
+    // 里字数随形状自适应：闭环曲线近乎全覆盖、开放笔画留空位更灵动（收束 L33）。
+    let target = 0;
+    for (const p of paths) target += Math.round(p.cells.length * (p.loop ? FLOW_FILL_LOOP : FLOW_FILL_STROKE));
+    target = Math.max(MIN_CHARS, Math.min(MAX_CHARS, target));
     adaptCharCount(target, paths.flatMap(p => p.cells));
     formCurrent();
     console.log(`Shape → ${def.name} (${paths.length} paths, ${total} cells, ${aliveIds().length}里字)`);
@@ -248,10 +284,10 @@ document.addEventListener('DOMContentLoaded', () => {
         motion.releaseShape();
         scatterTimer = setTimeout(reformShape, BREAK_RESTORE_MS);
       } else {
-        // 局部、小幅、美观的散开（收束 L31）：仅点击附近的里字轻轻外推。
+        // 点击处明显的"涟漪"散开（收束 L31）：附近里字明显向外弹开再归位。
         for (const char of aliveChars()) {
           const dist = Math.abs(char.gridX - col) + Math.abs(char.gridY - row);
-          if (dist <= 3) motion.scatter(char.id, col, row, 3);
+          if (dist <= 5) motion.scatter(char.id, col, row, 5);
         }
         scatterTimer = setTimeout(reformShape, SCATTER_RESTORE_MS);
       }
@@ -323,7 +359,7 @@ document.addEventListener('DOMContentLoaded', () => {
       motion.update(dtMs);
       motion.updateDisplayPositions(motion.tickProgress);
     }
-    stepFades(dtMs);
+    updateSpirals(dtMs); // 螺旋淡入/淡出（在显示位置更新之后，覆盖过渡里字的显示）
     if (microEnv > 0) microEnv = Math.max(0, microEnv - dtMs / MICRO_DECAY_MS);
 
     if (DEBUG) {
