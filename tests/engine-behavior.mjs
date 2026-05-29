@@ -46,7 +46,23 @@ async function testDoubleTapUsesGridCoordinates() {
   canvas.fire('mouseup');
   await wait(350);
 
-  assert.deepEqual(events, [['double', 2, 2]]);
+  // 即时点击：首下抬手立刻触发 tap；第二下触发 double（不再重复 tap）。
+  assert.deepEqual(events, [['tap', 2, 2], ['double', 2, 2]]);
+}
+
+async function testSingleTapFiresImmediately() {
+  globalThis.devicePixelRatio = 1;
+  const canvas = new FakeCanvas();
+  const events = [];
+  new GestureRecognizer(canvas, 16, {
+    onTap: (col, row) => events.push(['tap', col, row]),
+    onDoubleTap: () => events.push(['double']),
+  });
+
+  canvas.fire('mousedown', { clientX: 32, clientY: 48 });
+  canvas.fire('mouseup');
+  // No wait — tap should already have fired synchronously on mouseup.
+  assert.deepEqual(events, [['tap', 2, 3]]);
 }
 
 function createMotionWithOneChar(x = 10, y = 10) {
@@ -611,7 +627,98 @@ function testUniformSamplingKeepsSparseFeaturesAndSpread() {
     `FPS spread (${avgNN(out).toFixed(2)}) should exceed 1-D (${avgNN(naive).toFixed(2)})`);
 }
 
+// Ordered 4-connected rectangle ring (clockwise) — a clean flow loop for tests.
+function orderedRectRing(x0, y0, w, h) {
+  const cells = [];
+  for (let x = x0; x < x0 + w; x++) cells.push({ x, y: y0 });
+  for (let y = y0 + 1; y < y0 + h; y++) cells.push({ x: x0 + w - 1, y });
+  for (let x = x0 + w - 2; x >= x0; x--) cells.push({ x, y: y0 + h - 1 });
+  for (let y = y0 + h - 2; y >= y0 + 1; y--) cells.push({ x: x0, y });
+  return cells;
+}
+
+// Regression: flow（细轮廓/环绕）—— 里字沿有序环路流动，全员持续运动、几乎不
+// 脱离轨道、无重叠脱同步。
+function testFlowStreamsAlongPathStayingOnTrack() {
+  const grid = new Grid(24, 43);
+  const pool = new CharacterPool(200);
+  const motion = new MotionEngine(grid, 16, 0);
+  const ring = orderedRectRing(5, 8, 12, 10); // perimeter = 2*(12+10)-4 = 40 cells
+  const chars = [];
+  for (let i = 0; i < 30; i++) { // 30 chars on a 40-cell loop → 10 gaps to flow
+    const c = pool.acquire('字', 2 + (i % 18), 2 + Math.floor(i / 18));
+    chars.push(c);
+    motion.registerCharacter(c);
+  }
+  motion.setFlowPath(ring, chars.map(c => c.id), true);
+  const pathSet = new Set(ring.map(c => `${c.x},${c.y}`));
+  const moves = new Map(chars.map(c => [c.id, 0]));
+  let onPath = 0, samples = 0;
+
+  for (let t = 0; t < 200; t++) {
+    const before = new Map(chars.map(c => [c.id, `${c.gridX},${c.gridY}`]));
+    motion.update(150);
+    const seen = new Set();
+    for (const c of chars) {
+      const k = `${c.gridX},${c.gridY}`;
+      assert.equal(seen.has(k), false, `flow duplicate ${k} at ${t}`);
+      seen.add(k);
+      assert.equal(grid.getCharId(c.gridX, c.gridY), c.id, `flow desync ${c.id} at ${t}`);
+      if (before.get(c.id) !== k) moves.set(c.id, moves.get(c.id) + 1);
+      if (t > 40) { samples++; if (pathSet.has(k)) onPath++; }
+    }
+  }
+  const mv = [...moves.values()].sort((a, b) => a - b);
+  assert.ok(mv[0] >= 20, `every里字 should keep flowing, min moves ${mv[0]}`);
+  assert.ok(onPath / samples >= 0.95, `flow should stay on the outline, onPath ${(onPath / samples).toFixed(2)}`);
+}
+
+// Regression: 拖动环绕 —— beginOrbit 把里字收拢到手指周围环绕流动，moveOrbit
+// 跟随手指；全员持续运动、无重叠脱同步。
+function testOrbitClustersAroundFingerAndFollows() {
+  const grid = new Grid(24, 43);
+  const pool = new CharacterPool(200);
+  const motion = new MotionEngine(grid, 16, 0);
+  const chars = [];
+  for (let i = 0; i < 45; i++) {
+    const c = pool.acquire('字', 2 + (i % 18), 2 + Math.floor(i / 18));
+    chars.push(c);
+    motion.registerCharacter(c);
+  }
+  // Pretend a shape is active so orbit uses these as its participants.
+  motion.setShapeMask([{ x: 10, y: 10 }], chars.map(c => c.id), 'strict');
+
+  let fx = 12, fy = 20;
+  motion.beginOrbit(fx, fy);
+  const moves = new Map(chars.map(c => [c.id, 0]));
+  let near = 0, samples = 0;
+  for (let t = 0; t < 120; t++) {
+    if (t > 0 && t % 20 === 0) { fx = Math.min(20, fx + 2); motion.moveOrbit(fx, fy); }
+    const before = new Map(chars.map(c => [c.id, `${c.gridX},${c.gridY}`]));
+    motion.update(85);
+    const seen = new Set();
+    for (const c of chars) {
+      const k = `${c.gridX},${c.gridY}`;
+      assert.equal(seen.has(k), false, `orbit duplicate ${k} at ${t}`);
+      seen.add(k);
+      assert.equal(grid.getCharId(c.gridX, c.gridY), c.id, `orbit desync ${c.id} at ${t}`);
+      if (before.get(c.id) !== k) moves.set(c.id, moves.get(c.id) + 1);
+      if (t > 40) {
+        samples++;
+        const cheb = Math.max(Math.abs(c.gridX - fx), Math.abs(c.gridY - fy));
+        if (cheb <= 6) near++;
+      }
+    }
+  }
+  const mv = [...moves.values()].sort((a, b) => a - b);
+  assert.ok(mv[0] >= 30, `orbit should keep every里字 circulating, min moves ${mv[0]}`);
+  assert.ok(near / samples >= 0.9, `orbit should keep里字 around the finger, near ${(near / samples).toFixed(2)}`);
+}
+
 await testDoubleTapUsesGridCoordinates();
+await testSingleTapFiresImmediately();
+testFlowStreamsAlongPathStayingOnTrack();
+testOrbitClustersAroundFingerAndFollows();
 testDragProducesRelativeMotionNotRigidTranslation();
 testDynamicCharacterCountStaysCollisionFreeAndInSync();
 testUniformSamplingKeepsSparseFeaturesAndSpread();

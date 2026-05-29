@@ -155,24 +155,22 @@ export class GestureRecognizer {
     if (this._state === STATE.MAYBE_TAP) {
       const now = Date.now();
       const pos = this.toGrid(this._startPos.x, this._startPos.y);
+      const isDouble =
+        now - this._lastTapTime < DOUBLE_TAP_WINDOW &&
+        pos.col === this._lastTapPos.col &&
+        pos.row === this._lastTapPos.row;
 
-      if (now - this._lastTapTime < DOUBLE_TAP_WINDOW &&
-          pos.col === this._lastTapPos.col &&
-          pos.row === this._lastTapPos.row) {
-        // Double tap
-        clearTimeout(this._tapTimer);
-        this._state = STATE.IDLE;
+      this._state = STATE.IDLE;
+      if (isDouble) {
+        // 第二下：只触发双击（首下已即时触发过 tap）。
         this._lastTapTime = 0;
+        this._lastTapPos = { col: -1, row: -1 };
         this.cb.onDoubleTap?.(pos.col, pos.row);
       } else {
-        // Wait to confirm it's a single tap
-        this._state = STATE.TAP_PENDING;
-        this._tapTimer = setTimeout(() => {
-          this._state = STATE.IDLE;
-          this.cb.onTap?.(pos.col, pos.row);
-        }, DOUBLE_TAP_WINDOW);
+        // 即时响应：抬手立刻触发 tap，不再等双击窗口（消除点击延迟感）。
         this._lastTapTime = now;
         this._lastTapPos = { col: pos.col, row: pos.row };
+        this.cb.onTap?.(pos.col, pos.row);
       }
     }
 

@@ -60,9 +60,16 @@ export class MotionEngine {
     this._shapeMask = null;
     // 'strict' → 颜文字/巨字 hold formation near anchors (易辨形)
     // 'loose'  → curves/flowers roam the whole mask freely
+    // 'flow'   → 里字沿一条有序环路逐格流动（贪吃蛇/细轮廓流动）
     this._shapeConstraint = 'loose';
     this._shapeDragBaseMask = null;
     this._lastShapeDragShift = { col: 0, row: 0 };
+
+    // Flow（流动）state —— ordered ring/path the里字 stream along single-file.
+    this._flowCells = null;          // ordered Array<{x,y}> forming the path
+    this._flowIndexOf = new Map();   // charId → current path index it heads to
+    this._flowLoop = true;           // closed loop (ring/curve) vs open path
+    this._orbit = false;             // true while the drag "snake orbit" is active
 
     // Drag bias state
     this.dragBias = null; // { dx, dy, strength: 0-1 } — dx/dy is a unit-ish direction
@@ -117,62 +124,43 @@ export class MotionEngine {
   }
 
   /**
-   * Force-scatter a character away from a point.
-   * Sets a far target while preserving cell-by-cell movement.
+   * Force-scatter a character a SHORT distance away from a tap point — a small,
+   * tidy radial puff rather than flinging it across the screen. Keeps movement
+   * cell-by-cell; the里字 drifts home (reforms) shortly after.
    * @param {number} charId
-   * @param {number} fromCol — center of the "explosion"
+   * @param {number} fromCol — center of the puff
    * @param {number} fromRow
+   * @param {number} [radius=3] — max cells to push outward
    */
-  scatter(charId, fromCol, fromRow) {
+  scatter(charId, fromCol, fromRow, radius = 3) {
     const char = this.characters.get(charId);
     if (!char) return;
 
-    // Determine scatter direction (away from click point)
-    const dx = char.gridX - fromCol;
-    const dy = char.gridY - fromRow;
-    let dirX = 0, dirY = 0;
-    
-    const adx = Math.abs(dx), ady = Math.abs(dy);
-    if (adx === 0 && ady === 0) {
-      dirX = Math.random() > 0.5 ? 1 : -1;
-    } else if (adx >= ady) {
-      dirX = Math.sign(dx);
-    } else {
-      dirY = Math.sign(dy);
+    // Radial direction away from the tap (snapped to the grid).
+    let dx = char.gridX - fromCol;
+    let dy = char.gridY - fromRow;
+    if (dx === 0 && dy === 0) {
+      const a = Math.random() * Math.PI * 2;
+      dx = Math.cos(a); dy = Math.sin(a);
     }
+    const len = Math.hypot(dx, dy) || 1;
+    const ux = dx / len, uy = dy / len;
 
-    // Find the furthest unoccupied cell in the scatter direction (up to 6 cells)
+    // Push to the farthest free cell within `radius` along the radial ray.
     let bestX = char.gridX, bestY = char.gridY;
-    const dirs = [
-      { dx: dirX, dy: dirY },       // primary direction
-      { dx: dirY, dy: -dirX },      // perpendicular
-      { dx: -dirY, dy: dirX },      // opposite perpendicular
-    ];
-    
-    for (const d of dirs) {
-      if (d.dx === 0 && d.dy === 0) continue;
-      let cx = char.gridX, cy = char.gridY;
-      for (let step = 1; step <= 6; step++) {
-        const nx = char.gridX + d.dx * step;
-        const ny = char.gridY + d.dy * step;
-        if (nx < 0 || nx >= this.grid.cols || ny < 0 || ny >= this.grid.rows) break;
-        if (this.grid.isOccupied(nx, ny)) break;
-        cx = nx; cy = ny;
-      }
-      const dist = Math.abs(cx - char.gridX) + Math.abs(cy - char.gridY);
-      const bestDist = Math.abs(bestX - char.gridX) + Math.abs(bestY - char.gridY);
-      if (dist > bestDist) { bestX = cx; bestY = cy; }
+    for (let step = radius; step >= 1; step--) {
+      const nx = Math.round(char.gridX + ux * step);
+      const ny = Math.round(char.gridY + uy * step);
+      if (nx < 0 || ny < 0 || nx >= this.grid.cols || ny >= this.grid.rows) continue;
+      if (this.grid.isOccupied(nx, ny)) continue;
+      bestX = nx; bestY = ny;
+      break;
     }
 
-    if (bestX !== char.gridX || bestY !== char.gridY) {
-      this._wanderTargets.set(char.id, { tx: bestX, ty: bestY });
-    } else {
-      this._assignWanderTarget(char);
-    }
-
+    this._wanderTargets.set(char.id, { tx: bestX, ty: bestY });
     this._stuckTicks.set(char.id, 0);
     this._directionStreaks.set(char.id, 0);
-    this._shapeChars.delete(charId); // Release shape constraint
+    this._shapeChars.delete(charId); // briefly leave formation, then reform
   }
 
   /**
@@ -273,6 +261,152 @@ export class MotionEngine {
     this._shapeChars.clear();
     this._shapeMask = null;
     this._shapeDragBaseMask = null;
+    this._flowCells = null;
+    this._flowIndexOf.clear();
+    this._orbit = false;
+  }
+
+  // ── Flow（流动）—— 里字沿有序环路逐格单列流动 ────────────────
+
+  /**
+   * 让 charIds 沿 `orderedCells`（一条有序的、相邻连续的格子环路）流动。
+   * 路径格子数应略多于里字数，留出空位 → 像贪吃蛇/华容道一样单列推进。
+   * 同时用于：细轮廓流动（心形/曲线）与拖动时的"环绕手指"方环。
+   * @param {Array<{x,y}>} orderedCells —— 顺序即流动方向
+   * @param {number[]} charIds
+   * @param {boolean} [loop=true] —— 闭合环路
+   */
+  setFlowPath(orderedCells, charIds, loop = true) {
+    // 去掉重复格（保持顺序），保证 index→cell 唯一。
+    const seen = new Set();
+    const path = [];
+    for (const c of orderedCells) {
+      const k = this.grid.getCellKey(c.x, c.y);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      path.push({ x: c.x, y: c.y });
+    }
+    if (path.length === 0) return;
+
+    this._flowCells = path;
+    this._flowLoop = loop;
+    this._shapeMask = path;            // PIBT 仍据此把里字约束在路径上
+    this._shapeConstraint = 'flow';
+    this._shapeChars = new Set(charIds);
+
+    const L = path.length;
+    const ids = [...this._shapeChars];
+    const C = ids.length;
+    // 沿路径等距铺开里字（留出的空位即流动所需的"缝隙"）。就近匹配让初始
+    // 进入更顺：把里字按其当前位置在路径上的最近 index 排序后再等距落位。
+    ids.sort((a, b) => this._nearestFlowIndex(a) - this._nearestFlowIndex(b));
+    this._flowIndexOf.clear();
+    for (let k = 0; k < C; k++) {
+      const idx = Math.floor((k * L) / Math.max(C, 1)) % L;
+      const id = ids[k];
+      this._flowIndexOf.set(id, idx);
+      const cell = path[idx];
+      this._wanderTargets.set(id, { tx: cell.x, ty: cell.y });
+      this._stuckTicks.set(id, 0);
+    }
+  }
+
+  _nearestFlowIndex(charId) {
+    const char = this.characters.get(charId);
+    if (!char || !this._flowCells) return 0;
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < this._flowCells.length; i++) {
+      const c = this._flowCells[i];
+      const d = Math.abs(c.x - char.gridX) + Math.abs(c.y - char.gridY);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  _setFlowTarget(charId) {
+    const i = this._flowIndexOf.get(charId);
+    const cell = this._flowCells[i];
+    if (cell) this._wanderTargets.set(charId, { tx: cell.x, ty: cell.y });
+  }
+
+  _advanceFlowIndex(charId) {
+    const L = this._flowCells.length;
+    let i = this._flowIndexOf.get(charId) || 0;
+    if (this._flowLoop) i = (i + 1) % L;
+    else i = Math.min(i + 1, L - 1);
+    this._flowIndexOf.set(charId, i);
+    this._setFlowTarget(charId);
+  }
+
+  /**
+   * Begin the drag "snake orbit": 里字 ball up into a tight square ring around
+   * (cx, cy) and circulate around it. 用更快的 tick 让旋转鲜活。
+   */
+  beginOrbit(cx, cy) {
+    this._orbit = true;
+    this._dragActive = true;
+    this._dragMomentum = false;
+    this.dragBias = null;
+    const count = this._shapeChars.size || this.characters.size;
+    const ring = this._buildOrbitRing(cx, cy, count);
+    if (ring.length === 0) { this._orbit = false; return; }
+    const ids = this._shapeChars.size ? [...this._shapeChars] : [...this.characters.keys()];
+    this.setFlowPath(ring, ids, true);
+  }
+
+  /** Re-center the orbit ring on a moved finger, preserving each里字's phase. */
+  moveOrbit(cx, cy) {
+    if (!this._orbit) return;
+    const count = this._shapeChars.size || this.characters.size;
+    const ring = this._buildOrbitRing(cx, cy, count);
+    if (ring.length === 0) return;
+    const L = ring.length;
+    // 保留各里字的相位（沿环 index），换成新环（可能因贴边而长度变化 → 取模）。
+    const prev = new Map(this._flowIndexOf);
+    this._flowCells = ring;
+    this._shapeMask = ring;
+    for (const id of this._shapeChars) {
+      const i = (prev.get(id) || 0) % L;
+      this._flowIndexOf.set(id, i);
+      this._setFlowTarget(id);
+    }
+  }
+
+  /** End the orbit; caller re-forms the previous shape at the release spot. */
+  endOrbit() {
+    this._orbit = false;
+    this._dragActive = false;
+    this._flowCells = null;
+    this._flowIndexOf.clear();
+  }
+
+  /**
+   * Build an ordered square-annulus ring around (cx,cy) with a small centre hole
+   * (finger sits in it), big enough to hold `count`里字 plus流动 gaps. Cells are
+   * ordered by angle → walking the order circulates around the finger.
+   */
+  _buildOrbitRing(cx, cy, count) {
+    const need = Math.ceil(count * 1.3) + 2; // gaps for clean single-file flow
+    const hole = 1;                           // 3×3 centre hole around the finger
+    let R = hole + 1;
+    let cells = [];
+    while (R < Math.max(this.grid.cols, this.grid.rows)) {
+      cells = [];
+      for (let y = cy - R; y <= cy + R; y++) {
+        for (let x = cx - R; x <= cx + R; x++) {
+          if (x < 0 || y < 0 || x >= this.grid.cols || y >= this.grid.rows) continue;
+          const cheb = Math.max(Math.abs(x - cx), Math.abs(y - cy));
+          if (cheb <= hole) continue;        // keep the centre hole
+          cells.push({ x, y });
+        }
+      }
+      if (cells.length >= need) break;
+      R++;
+    }
+    // Order by angle around the centre → circulation order.
+    cells.sort((a, b) =>
+      Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+    return cells;
   }
 
   update(deltaTime) {
@@ -398,10 +532,16 @@ export class MotionEngine {
 
         const target = this._wanderTargets.get(char.id);
         if (target && nx === target.tx && ny === target.ty) {
-          this._wanderTargets.delete(char.id);
-          // Shape-constrained: pick a new mask cell to keep wandering within shape
-          if (this._shapeChars.has(char.id)) {
-            this._assignWanderTarget(char);
+          if (this._shapeConstraint === 'flow' && this._shapeChars.has(char.id)) {
+            // 到达当前路径格 → 推进到下一格（少量随机停顿，增加生命感）。
+            if (Math.random() < 0.12) this._setFlowTarget(char.id); // pause one tick
+            else this._advanceFlowIndex(char.id);
+          } else {
+            this._wanderTargets.delete(char.id);
+            // Shape-constrained: pick a new mask cell to keep wandering within shape
+            if (this._shapeChars.has(char.id)) {
+              this._assignWanderTarget(char);
+            }
           }
         }
 
@@ -416,8 +556,13 @@ export class MotionEngine {
         this._directionStreaks.set(char.id, 0);
 
         if (stuck > STUCK_LIMIT) {
-          // Force a new target far away — PIBT will naturally find a way out
-          this._assignWanderTarget(char);
+          if (this._shapeConstraint === 'flow' && this._shapeChars.has(char.id)) {
+            // 流动中被堵 → 跳到下一路径格绕过拥堵，保持单列推进不卡死。
+            this._advanceFlowIndex(char.id);
+          } else {
+            // Force a new target far away — PIBT will naturally find a way out
+            this._assignWanderTarget(char);
+          }
           this._stuckTicks.set(char.id, 0);
         }
       }
@@ -429,7 +574,8 @@ export class MotionEngine {
     }
 
     // During drag, keep shape characters alive inside the shifted mask.
-    if (this.dragBias && this.dragBias.strength > 0.2) {
+    // Flow（环绕/细轮廓流动）self-drives via flow indices — skip the wander block.
+    if (this._shapeConstraint !== 'flow' && this.dragBias && this.dragBias.strength > 0.2) {
       for (const char of chars) {
         const stuck = this._stuckTicks.get(char.id) || 0;
         if (this._shapeChars.has(char.id) && this._shapeMask) {
