@@ -415,7 +415,88 @@ function testDragRefreshesSomeShapeTargetsDuringMotion() {
   assert.ok(changed >= 8, `expected drag to refresh internal targets, got ${changed}`);
 }
 
+function buildStrictShapeWithSlack(charCount = 60) {
+  const grid = new Grid(24, 43);
+  const pool = new CharacterPool(200);
+  const motion = new MotionEngine(grid, 16, 0);
+  const chars = [];
+  for (let i = 0; i < charCount; i++) {
+    const char = pool.acquire('字', 2 + (i % 20), 2 + Math.floor(i / 20));
+    chars.push(char);
+    motion.registerCharacter(char);
+  }
+  // 80-cell mask for 60 chars → 20 empty cells of华容道 slack.
+  const mask = [];
+  for (let y = 10; y < 18; y++) {
+    for (let x = 6; x < 16; x++) mask.push({ x, y });
+  }
+  motion.setShapeMask(mask, chars.map(c => c.id), 'strict');
+  return { grid, pool, motion, chars, mask };
+}
+
+// Regression: strict (颜文字/巨字) shapes must NOT freeze once formed — every
+// 里字 keeps sliding (华容道) — while the形状 still holds (chars stay in mask).
+function testStrictShapeKeepsAllCharactersMovingAndHoldsForm() {
+  const { motion, chars, mask } = buildStrictShapeWithSlack();
+  const maskSet = new Set(mask.map(m => `${m.x},${m.y}`));
+  const moves = new Map(chars.map(c => [c.id, 0]));
+  let leaked = 0;
+
+  for (let tick = 0; tick < 300; tick++) {
+    const before = new Map(chars.map(c => [c.id, `${c.gridX},${c.gridY}`]));
+    motion.update(200);
+    for (const c of chars) {
+      if (before.get(c.id) !== `${c.gridX},${c.gridY}`) moves.set(c.id, moves.get(c.id) + 1);
+      if (tick > 60 && !maskSet.has(`${c.gridX},${c.gridY}`)) leaked++;
+    }
+  }
+
+  const vals = [...moves.values()].sort((a, b) => a - b);
+  assert.ok(vals[0] >= 120, `strict shape should keep every里字 moving, min moves ${vals[0]}`);
+  assert.equal(leaked, 0, `strict里字 should stay within the shape mask, leaked ${leaked}`);
+}
+
+// Regression: dragging must feel responsive — the engine runs a faster (but
+// still constant) tick while a drag is active, then eases back to idle speed
+// as the post-release momentum decays.
+function testDragRunsFasterTickThenEasesBack() {
+  const { motion } = buildStrictShapeWithSlack();
+
+  const idleTick = motion._effectiveTick();
+  motion.beginShapeDrag();
+  const dragTick = motion._effectiveTick();
+  assert.ok(dragTick < idleTick, `drag tick (${dragTick}) should be faster than idle (${idleTick})`);
+
+  motion.dragBias = { dx: 1, dy: 0, strength: 1 };
+  motion.endShapeDrag();
+  // Fully-charged momentum → still near drag speed, well below idle.
+  const justReleased = motion._effectiveTick();
+  assert.ok(justReleased < idleTick, `post-release tick (${justReleased}) should still be fast`);
+  // Momentum spent → back to idle speed.
+  motion.dragBias.strength = 0;
+  assert.equal(motion._effectiveTick(), idleTick);
+}
+
+// Regression: a tap must actually scatter里字 — even inside a strict shape the
+// tapped里字 should slide away (previously they froze in formation and clicks
+// appeared dead).
+function testScatterMovesCharacterOutOfStrictFormation() {
+  const { motion, chars } = buildStrictShapeWithSlack();
+  for (let tick = 0; tick < 40; tick++) motion.update(200); // let it form & settle
+
+  const victim = chars[0];
+  const startKey = `${victim.gridX},${victim.gridY}`;
+  motion.scatter(victim.id, victim.gridX, victim.gridY);
+  for (let tick = 0; tick < 12; tick++) motion.update(200);
+
+  assert.notEqual(`${victim.gridX},${victim.gridY}`, startKey,
+    'scattered里字 should slide away from its formation cell');
+}
+
 await testDoubleTapUsesGridCoordinates();
+testStrictShapeKeepsAllCharactersMovingAndHoldsForm();
+testDragRunsFasterTickThenEasesBack();
+testScatterMovesCharacterOutOfStrictFormation();
 testScatterDoesNotTeleportGridPosition();
 testShapeDragPreservesAndOffsetsMask();
 testBiasedPickHandlesSmallCandidateSets();
