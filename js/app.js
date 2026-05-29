@@ -31,13 +31,13 @@ const SCATTER_RESTORE_MS = 2500;
 const FADE_MS = 600;           // 里字自适应增减时的淡入/淡出时长
 const INITIAL_CHARS = 56;      // 首屏播种数（之后随形状自适应增减）
 const MIN_CHARS = 28;
-const MAX_CHARS = 112;
+const MAX_CHARS = 156;
 // 形状掩码即字形本身（均匀采样）；里字只填满其中的 FILL_RATIO 比例，余下为
 // "空格"。有空格里字才能像华容道一样持续滑动，而非成形即冻结。填充率越高越易
 // 辨形、越低越灵动；strict（颜文字/巨字）填得更满保辨形，loose（曲线/花）更松。
 // 所有动态形状都让里字持续运动：留出空位，里字在掩码内华容道式滑动（轮廓与
 // 字数固定，但不静止）。strict（颜文字/巨字）填得较满保辨形，loose/flow 更松。
-const FILL_RATIO = { strict: 0.8, loose: 0.72, flow: 0.80 };
+const FILL_RATIO = { strict: 0.88, loose: 0.76, flow: 0.82 };
 const MICRO_AMP = 2.0;         // 亚像素微动幅度（px）：叠加在格子滑动之上的"呼吸"生命感
 const BREAK_PROB = 0.3;        // 点击概率打破轮廓（里字散成自由云团再归位）
 const BREAK_RESTORE_MS = 1600;
@@ -71,12 +71,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // （复杂形状如颜文字/笔画多的汉字配更大的格数，才能拼清晰，收束 L33）。
   // flow:true 的细轮廓用"沿轮廓流动"呈现（收束 L34）；其余用静态掩码 + 华容道游走。
   const SHAPES = [
-    { name: '^_^',  constraint: 'strict', cells: 64,  make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
-    { name: '>_<',  constraint: 'strict', cells: 64,  make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
-    { name: '心',   constraint: 'strict', cells: 92,  make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
-    { name: '春',   constraint: 'strict', cells: 112, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
-    { name: '爱心', constraint: 'flow',   flow: true, cells: 64, make: n => shapes.sampleCurveOrdered('heart', gridCols, gridRows, n) },
-    { name: '四叶花', constraint: 'loose', cells: 92,  make: n => shapes.sampleCurve('rose', gridCols, gridRows, n) },
+    { name: '^_^',  constraint: 'strict', cells: 96,  make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
+    { name: '>_<',  constraint: 'strict', cells: 96,  make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
+    { name: '心',   constraint: 'strict', cells: 132, make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
+    { name: '春',   constraint: 'strict', cells: 156, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
+    { name: '爱心', constraint: 'flow',   flow: true, cells: 76, make: n => shapes.sampleCurveOrdered('heart', gridCols, gridRows, n) },
+    { name: '四叶花', constraint: 'loose', cells: 124, make: n => shapes.sampleCurve('rose', gridCols, gridRows, n) },
   ];
   let shapeIndex = 0;
   let shapeActive = false;
@@ -88,17 +88,30 @@ document.addEventListener('DOMContentLoaded', () => {
   const aliveChars = () => pool.getAll().filter(c => c.fadeTarget !== 0);
   const aliveIds = () => aliveChars().map(c => c.id);
 
-  // 从画布边缘找一个空格让新里字淡入（首次/需要增生时）。
-  function spawnEdgeChar() {
-    const edge = [];
-    for (let x = 0; x < gridCols; x++) { edge.push([x, 0]); edge.push([x, gridRows - 1]); }
-    for (let y = 1; y < gridRows - 1; y++) { edge.push([0, y]); edge.push([gridCols - 1, y]); }
-    for (let i = edge.length - 1; i > 0; i--) {
-      const j = (Math.random() * (i + 1)) | 0;
-      [edge[i], edge[j]] = [edge[j], edge[i]];
+  // 从当前字形附近找空格让新里字原地淡入/浮现，而不是从两侧排队进入。
+  function spawnEmergentChar(mask = []) {
+    const candidates = [];
+    const seen = new Set();
+    const push = (x, y) => {
+      if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) return;
+      const key = grid.getCellKey(x, y);
+      if (seen.has(key) || grid.isOccupied(x, y)) return;
+      seen.add(key);
+      candidates.push([x, y]);
+    };
+
+    // 先在字形内部浮现；若内部暂满，再在轮廓一格外的“气泡层”浮现。
+    for (const c of mask) push(c.x, c.y);
+    for (const c of mask) {
+      push(c.x + 1, c.y); push(c.x - 1, c.y);
+      push(c.x, c.y + 1); push(c.x, c.y - 1);
     }
-    const cell = edge.find(([x, y]) => !grid.isOccupied(x, y));
-    if (!cell) return null;
+    if (candidates.length === 0) {
+      for (let a = 0; a < 80; a++) push((Math.random() * gridCols) | 0, (Math.random() * gridRows) | 0);
+    }
+    if (candidates.length === 0) return null;
+
+    const cell = candidates[(Math.random() * candidates.length) | 0];
     const c = pool.acquire(nextGlyph(), cell[0], cell[1]);
     c.alpha = 0;
     c.fadeTarget = 1;
@@ -117,13 +130,13 @@ document.addEventListener('DOMContentLoaded', () => {
     return [c.gridX, gridRows - 1];
   }
 
-  // 调整在册里字数到 target：不足则边缘淡入，过多则淡出离场（挑离形状中心最远者）。
+  // 调整在册里字数到 target：不足则在字形附近浮现，过多则淡出离场（挑离形状中心最远者）。
   function adaptCharCount(target, mask) {
     target = Math.max(MIN_CHARS, Math.min(MAX_CHARS, target));
     const alive = aliveChars();
     const diff = target - alive.length;
     if (diff > 0) {
-      for (let k = 0; k < diff; k++) spawnEdgeChar();
+      for (let k = 0; k < diff; k++) spawnEmergentChar(mask);
     } else if (diff < 0) {
       let cx = 0, cy = 0;
       for (const cell of mask) { cx += cell.x; cy += cell.y; }
@@ -221,6 +234,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // ── Drag state ────────────────────────────────────────────
   let dragging = false;
   let dragEnd = null;    // last finger cell during a drag (release / reform spot)
+  let dragFocus = null;  // rendered drag halo, in grid coordinates
   let scatterTimer = null;
 
   const gestures = new GestureRecognizer(renderer.canvas, CELL_SIZE, {
@@ -255,6 +269,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!shapeActive) return;
       dragging = true;
       dragEnd = { col, row };
+      dragFocus = { col, row };
       clearTimeout(scatterTimer);
       motion.beginOrbit(col, row);
     },
@@ -262,6 +277,7 @@ document.addEventListener('DOMContentLoaded', () => {
     onDragMove(col, row) {
       if (!dragging) return;
       dragEnd = { col, row };
+      dragFocus = { col, row };
       motion.moveOrbit(col, row);
     },
 
@@ -269,6 +285,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!dragging) return;
       dragging = false;
       motion.endOrbit();
+      dragFocus = null;
       if (dragEnd) reformAt(dragEnd.col, dragEnd.row); // 落点还原形状
     },
   });
@@ -311,21 +328,45 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const ctx = renderer.getContext();
+    const tSec = now / 1000;
     ctx.font = `${FONT_SIZE}px "PingFang SC", "Microsoft YaHei", sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    if (dragFocus) {
+      const x = dragFocus.col * CELL_SIZE + CELL_SIZE / 2;
+      const y = dragFocus.row * CELL_SIZE + CELL_SIZE / 2;
+      const pulse = 1 + Math.sin(tSec * 8) * 0.08;
+      ctx.save();
+      ctx.globalAlpha = 0.18;
+      ctx.strokeStyle = '#d8e7ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(x, y, CELL_SIZE * 3.2 * pulse, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 0.10;
+      ctx.fillStyle = '#d8e7ff';
+      ctx.beginPath();
+      ctx.arc(x, y, CELL_SIZE * 1.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
     ctx.fillStyle = '#e0e0e0';
     // 亚像素微动：固定阵型（如颜文字/巨字满铺）靠它呈现"呼吸/轻摆"的生命感，
     // 让里字看起来全员在动而不破坏形状清晰度（位移 < 半格，绝不重叠）。
-    const tSec = now / 1000;
     for (const char of pool.getAll()) {
       if (char.alpha > 0.01) {
         const mx = Math.sin(tSec * 1.7 + char.id * 1.3) * MICRO_AMP;
         const my = Math.cos(tSec * 1.4 + char.id * 2.1) * MICRO_AMP;
+        const x = char.displayX + CELL_SIZE / 2 + mx;
+        const y = char.displayY + CELL_SIZE / 2 + my;
+        const pop = 0.72 + 0.28 * Math.min(1, char.alpha);
+        ctx.save();
         ctx.globalAlpha = char.alpha;
-        ctx.fillText(char.char,
-          char.displayX + CELL_SIZE / 2 + mx,
-          char.displayY + CELL_SIZE / 2 + my);
+        ctx.translate(x, y);
+        ctx.scale(pop, pop);
+        ctx.fillText(char.char, 0, 0);
+        ctx.restore();
       }
     }
     ctx.globalAlpha = 1;
