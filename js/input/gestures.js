@@ -139,12 +139,12 @@ export class GestureRecognizer {
       if (this._state === STATE.MAYBE_TAP) {
         this._state = STATE.DRAGGING;
         const pos = this.toGrid(this._startPos.x, this._startPos.y);
-        this.cb.onDragStart?.(pos.col, pos.row);
+        this.cb.onDragStart?.(pos.col, pos.row, pos.px, pos.py);
       }
 
       if (this._state === STATE.DRAGGING) {
         const pos = this.toGrid(px, py);
-        this.cb.onDragMove?.(pos.col, pos.row, dx, dy);
+        this.cb.onDragMove?.(pos.col, pos.row, pos.px, pos.py);
       }
     }
   }

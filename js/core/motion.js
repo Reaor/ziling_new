@@ -60,26 +60,25 @@ export class MotionEngine {
     this._shapeMask = null;
     // 'strict' → 颜文字/巨字 hold formation near anchors (易辨形)
     // 'loose'  → curves/flowers roam the whole mask freely
-    // 'flow'   → 里字沿一条有序环路逐格流动（贪吃蛇/细轮廓流动）
+    // 'flow'   → 里字沿一组有序路径（笔画/曲线）流动：闭环绕圈、开放笔画往返
     this._shapeConstraint = 'loose';
     this._shapeDragBaseMask = null;
     this._lastShapeDragShift = { col: 0, row: 0 };
 
-    // Flow（流动）state —— ordered ring/path the里字 stream along single-file.
-    this._flowCells = null;          // ordered Array<{x,y}> forming the path
-    this._flowIndexOf = new Map();   // charId → current path index it heads to
-    this._flowLoop = true;           // closed loop (ring/curve) vs open path
+    // Flow（多路径流动）state
+    this._flowPaths = null;          // Array<{cells:[{x,y}], loop:bool, dir:1|-1}>
+    this._flowOf = new Map();        // charId → { p:pathIdx, i:cellIdx }
 
-    // Orbit（拖动环绕）state —— 里字聚成方形，按同心方环逐层旋转，跟手整体平移。
+    // Orbit（拖动环绕）state —— 显示层驱动的同心方块旋转，跟手整体平移、逐渐加速。
     this._orbit = false;
-    this._orbitCenter = { x: 0, y: 0 };
-    this._orbitOf = new Map();       // charId → { ring, slot }
-    this._ringPerimCache = new Map(); // ring radius → ordered perimeter offsets
-    this._orbitDir = 1;              // rotation direction (CW)
+    this._orbitOf = new Map();       // charId → { ring, k, n }
+    this._orbitCenterPx = { x: 0, y: 0 };
+    this._orbitMaxRing = 1;
     this._orbitElapsed = 0;          // ms since orbit began (drives 逐渐加速)
-    this.orbitTickStart = 175;       // 起始较慢
-    this.orbitTickEnd = 70;          // 逐渐加速到的最快 tick
-    this.orbitRampMs = 1100;
+    this._orbitPhase = 0;            // accumulated rotation (rad)
+    this.orbitSpinStart = 0.0016;    // rad/ms 起始转速
+    this.orbitSpinEnd = 0.0085;      // rad/ms 加速到的转速
+    this.orbitRampMs = 1400;
 
     // Drag bias state
     this.dragBias = null; // { dx, dy, strength: 0-1 } — dx/dy is a unit-ish direction
@@ -271,8 +270,8 @@ export class MotionEngine {
     this._shapeChars.clear();
     this._shapeMask = null;
     this._shapeDragBaseMask = null;
-    this._flowCells = null;
-    this._flowIndexOf.clear();
+    this._flowPaths = null;
+    this._flowOf.clear();
     this._orbit = false;
     this._orbitOf.clear();
   }
@@ -287,47 +286,94 @@ export class MotionEngine {
    * @param {number[]} charIds
    * @param {boolean} [loop=true] —— 闭合环路
    */
-  setFlowPath(orderedCells, charIds, loop = true) {
-    // 去掉重复格（保持顺序），保证 index→cell 唯一。
-    const seen = new Set();
-    const path = [];
-    for (const c of orderedCells) {
-      const k = this.grid.getCellKey(c.x, c.y);
-      if (seen.has(k)) continue;
-      seen.add(k);
-      path.push({ x: c.x, y: c.y });
+  /**
+   * 多路径流动：paths = Array<{cells:[{x,y}], loop:bool}>。
+   *   - loop=true（曲线/数学曲线）：里字沿闭环首尾相连地绕圈流动。
+   *   - loop=false（颜文字/巨字的每条笔画）：里字在该笔画上往返（slosh）流动，
+   *     实心填满笔画格子，全员速率一致地动。
+   * 里字按各路径长度比例分配，每条路径都留出空位（流动所需缝隙）。
+   */
+  setFlowPaths(paths, charIds) {
+    const norm = [];
+    for (const p of paths || []) {
+      const seen = new Set();
+      const cells = [];
+      for (const c of p.cells) {
+        const k = this.grid.getCellKey(c.x, c.y);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        cells.push({ x: c.x, y: c.y });
+      }
+      if (cells.length > 0) norm.push({ cells, loop: !!p.loop, dir: 1 });
     }
-    if (path.length === 0) return;
+    if (norm.length === 0) return;
 
-    this._flowCells = path;
-    this._flowLoop = loop;
-    this._shapeMask = path;            // PIBT 仍据此把里字约束在路径上
+    this._flowPaths = norm;
     this._shapeConstraint = 'flow';
     this._shapeChars = new Set(charIds);
+    this._flowOf.clear();
 
-    const L = path.length;
+    // union of all path cells → PIBT containment mask
+    const seenM = new Set();
+    const mask = [];
+    for (const p of norm) for (const c of p.cells) {
+      const k = this.grid.getCellKey(c.x, c.y);
+      if (seenM.has(k)) continue;
+      seenM.add(k);
+      mask.push(c);
+    }
+    this._shapeMask = mask;
+
+    // allocate chars across paths ∝ length, each path keeping ≥1 gap, but with a
+    // per-stroke floor so short strokes (颜文字的"嘴") aren't starved vs the eyes.
     const ids = [...this._shapeChars];
-    const C = ids.length;
-    // 沿路径等距铺开里字（留出的空位即流动所需的"缝隙"）。就近匹配让初始
-    // 进入更顺：把里字按其当前位置在路径上的最近 index 排序后再等距落位。
-    ids.sort((a, b) => this._nearestFlowIndex(a) - this._nearestFlowIndex(b));
-    this._flowIndexOf.clear();
-    for (let k = 0; k < C; k++) {
-      const idx = Math.floor((k * L) / Math.max(C, 1)) % L;
-      const id = ids[k];
-      this._flowIndexOf.set(id, idx);
-      const cell = path[idx];
-      this._wanderTargets.set(id, { tx: cell.x, ty: cell.y });
-      this._stuckTicks.set(id, 0);
+    const cap = norm.map(p => Math.max(0, p.cells.length - 1));
+    const totalLen = norm.reduce((s, p) => s + p.cells.length, 0) || 1;
+    const floor = norm.map((p, k) => Math.min(cap[k], Math.min(4, p.cells.length)));
+    const alloc = norm.map((p, k) =>
+      Math.min(cap[k], Math.max(floor[k], Math.round(ids.length * p.cells.length / totalLen))));
+    let assigned = alloc.reduce((a, b) => a + b, 0);
+    let g = 0, guard = 0;
+    while (assigned < ids.length && norm.some((p, k) => alloc[k] < cap[k]) && guard++ < 10000) {
+      if (alloc[g] < cap[g]) { alloc[g]++; assigned++; }
+      g = (g + 1) % norm.length;
+    }
+    guard = 0;
+    while (assigned > ids.length && guard++ < 10000) {
+      if (alloc[g] > floor[g]) { alloc[g]--; assigned--; }
+      else if (alloc[g] > 0) { alloc[g]--; assigned--; }
+      g = (g + 1) % norm.length;
+    }
+
+    let cursor = 0;
+    for (let p = 0; p < norm.length; p++) {
+      const path = norm[p];
+      const L = path.cells.length;
+      const n = Math.min(alloc[p], ids.length - cursor);
+      const pIds = ids.slice(cursor, cursor + n);
+      cursor += n;
+      // seed by nearest path cell → smoother entry (fewer crossings)
+      pIds.sort((a, b) => this._nearestPathIndex(path, a) - this._nearestPathIndex(path, b));
+      for (let k = 0; k < n; k++) {
+        const idx = Math.floor((k * L) / Math.max(n, 1)) % L;
+        this._flowOf.set(pIds[k], { p, i: idx });
+        this._stuckTicks.set(pIds[k], 0);
+        this._setFlowTarget(pIds[k]);
+      }
     }
   }
 
-  _nearestFlowIndex(charId) {
+  /** Single-path convenience (curves / tests). */
+  setFlowPath(orderedCells, charIds, loop = true) {
+    this.setFlowPaths([{ cells: orderedCells, loop }], charIds);
+  }
+
+  _nearestPathIndex(path, charId) {
     const char = this.characters.get(charId);
-    if (!char || !this._flowCells) return 0;
+    if (!char) return 0;
     let best = 0, bestD = Infinity;
-    for (let i = 0; i < this._flowCells.length; i++) {
-      const c = this._flowCells[i];
+    for (let i = 0; i < path.cells.length; i++) {
+      const c = path.cells[i];
       const d = Math.abs(c.x - char.gridX) + Math.abs(c.y - char.gridY);
       if (d < bestD) { bestD = d; best = i; }
     }
@@ -335,134 +381,120 @@ export class MotionEngine {
   }
 
   _setFlowTarget(charId) {
-    const i = this._flowIndexOf.get(charId);
-    const cell = this._flowCells[i];
+    const o = this._flowOf.get(charId);
+    if (!o) return;
+    const cell = this._flowPaths[o.p].cells[o.i];
     if (cell) this._wanderTargets.set(charId, { tx: cell.x, ty: cell.y });
   }
 
   _advanceFlowIndex(charId) {
-    const L = this._flowCells.length;
-    let i = this._flowIndexOf.get(charId) || 0;
-    if (this._flowLoop) i = (i + 1) % L;
-    else i = Math.min(i + 1, L - 1);
-    this._flowIndexOf.set(charId, i);
+    const o = this._flowOf.get(charId);
+    if (!o) return;
+    const path = this._flowPaths[o.p];
+    const L = path.cells.length;
+    if (path.loop) {
+      o.i = (o.i + 1) % L;
+    } else {
+      let ni = o.i + path.dir;
+      if (ni < 0 || ni >= L) {        // reached an end → reverse this笔画 (往返)
+        path.dir *= -1;
+        ni = Math.max(0, Math.min(L - 1, o.i + path.dir));
+      }
+      o.i = ni;
+    }
     this._setFlowTarget(charId);
   }
 
-  /**
-   * Begin the drag orbit (收束 L30): 里字 gather into a SQUARE centred on the
-   * press point and rotate as concentric square rings (一层层环绕中心), speeding
-   * up over time. While dragging, the whole square translates to follow the
-   * finger (整体平移) yet keeps spinning.
-   */
-  beginOrbit(cx, cy) {
+  // ── Orbit（拖动环绕）—— 显示层驱动，绕开 PIBT ───────────────────
+  // 里字聚成方形，按同心方环连续旋转（外层略慢 → 层层错动，不单调）；中心=手指，
+  // 整块刚性平移、跟随手指速度；拖得越久转得越快。松手时把里字落到不重叠的格子。
+  isOrbiting() { return this._orbit; }
+
+  startOrbit(charIds, cxPx, cyPx) {
     this._orbit = true;
     this._dragActive = true;
     this._dragMomentum = false;
     this.dragBias = null;
     this._orbitElapsed = 0;
-    this._shapeConstraint = 'orbit';
-    if (this._shapeChars.size === 0) {
-      this._shapeChars = new Set(this.characters.keys());
+    this._orbitPhase = 0;
+    this._orbitCenterPx = { x: cxPx, y: cyPx };
+    const ids = (charIds && charIds.length) ? [...charIds] : [...this.characters.keys()];
+    // fill concentric rings inner→outer, capacity ∝ perimeter (≈8r).
+    this._orbitOf.clear();
+    let i = 0, r = 1;
+    while (i < ids.length) {
+      const n = Math.min(Math.max(4, 8 * r), ids.length - i);
+      for (let k = 0; k < n; k++) this._orbitOf.set(ids[i + k], { ring: r, k, n });
+      i += n; r++;
     }
-    this._layoutOrbit(cx, cy);
+    this._orbitMaxRing = r - 1;
   }
 
-  /** Re-center the square on the moved finger; whole block translates, keeps spinning. */
-  moveOrbit(cx, cy) {
+  updateOrbitDisplay(dtMs, cxPx, cyPx) {
     if (!this._orbit) return;
-    const R = this._orbitMaxRing;
-    // Clamp so the whole square stays in-bounds → no clipping while dragging.
-    cx = Math.max(R, Math.min(this.grid.cols - 1 - R, cx));
-    cy = Math.max(R, Math.min(this.grid.rows - 1 - R, cy));
-    this._orbitCenter = { x: cx, y: cy };
-    // 关键：约束区域（方块掩码）必须跟着平移，否则里字被困在旧方块里不能整体跟手。
-    this._shapeMask = this._buildOrbitMask(cx, cy, R);
-    for (const id of this._shapeChars) this._setOrbitTarget(id);
-  }
+    const cell = this.cellSize;
+    const W = this.grid.cols * cell, H = this.grid.rows * cell;
+    const pad = (this._orbitMaxRing + 1) * cell;
+    cxPx = Math.max(Math.min(pad, W / 2), Math.min(W - pad, cxPx));
+    cyPx = Math.max(Math.min(pad, H / 2), Math.min(H - pad, cyPx));
+    this._orbitCenterPx = { x: cxPx, y: cyPx };
 
-  /** Square region (Chebyshev ≤ R, centre hole excluded) used to constrain orbit. */
-  _buildOrbitMask(cx, cy, R) {
-    const mask = [];
-    for (let dy = -R; dy <= R; dy++) {
-      for (let dx = -R; dx <= R; dx++) {
-        if (dx === 0 && dy === 0) continue;
-        const x = cx + dx, y = cy + dy;
-        if (x < 0 || y < 0 || x >= this.grid.cols || y >= this.grid.rows) continue;
-        mask.push({ x, y });
-      }
+    this._orbitElapsed += dtMs;
+    const t = Math.min(1, this._orbitElapsed / this.orbitRampMs);
+    const spin = this.orbitSpinStart + (this.orbitSpinEnd - this.orbitSpinStart) * t; // rad/ms
+    this._orbitPhase += dtMs * spin;
+
+    for (const [id, o] of this._orbitOf) {
+      const char = this.characters.get(id);
+      if (!char) continue;
+      const ringPhase = this._orbitPhase * (1 - 0.12 * (o.ring - 1)); // 外层略慢
+      const theta = (2 * Math.PI * o.k) / o.n + ringPhase;
+      const c = Math.cos(theta), s = Math.sin(theta);
+      const m = Math.max(Math.abs(c), Math.abs(s)) || 1; // 圆角→方形外廓映射
+      const rad = o.ring * cell;
+      char.displayX = cxPx + (rad * c) / m - cell / 2;
+      char.displayY = cyPx + (rad * s) / m - cell / 2;
     }
-    return mask;
   }
 
-  /** End the orbit; caller re-forms the previous shape at the release spot. */
+  /** End the orbit; snap里字 to distinct cells so PIBT can re-form the shape. */
   endOrbit() {
+    if (!this._orbit) return;
     this._orbit = false;
     this._dragActive = false;
+    const cell = this.cellSize;
+    const used = new Set();
+    this.grid.clearAll();
+    for (const id of this._orbitOf.keys()) {
+      const char = this.characters.get(id);
+      if (!char) continue;
+      let gx = Math.max(0, Math.min(this.grid.cols - 1, Math.round(char.displayX / cell)));
+      let gy = Math.max(0, Math.min(this.grid.rows - 1, Math.round(char.displayY / cell)));
+      if (used.has(this.grid.getCellKey(gx, gy))) {
+        const f = this._nearestFreeCell(gx, gy, used);
+        gx = f.x; gy = f.y;
+      }
+      used.add(this.grid.getCellKey(gx, gy));
+      char.gridX = gx; char.gridY = gy;
+      char.prevGridX = gx; char.prevGridY = gy;
+      this.grid.occupy(id, gx, gy);
+    }
     this._orbitOf.clear();
   }
 
-  /**
-   * Assign每个里字 a (ring, slot) filling concentric square rings inner→outer
-   * around the centre (ring 0 / 中心格 left empty for the finger), then point
-   * each at its ring cell. Also records the square region as the shape mask so
-   * PIBT keeps里字 inside the block.
-   */
-  _layoutOrbit(cx, cy) {
-    const ids = [...this._shapeChars];
-    const count = ids.length;
-    // Smallest R whose rings 1..R hold every里字: Σ 8r = 4R(R+1).
-    let R = 1;
-    while (4 * R * (R + 1) < count) R++;
-    this._orbitMaxRing = R;
-
-    R = this._orbitMaxRing;
-    cx = Math.max(R, Math.min(this.grid.cols - 1 - R, cx));
-    cy = Math.max(R, Math.min(this.grid.rows - 1 - R, cy));
-    this._orbitCenter = { x: cx, y: cy };
-
-    this._orbitOf.clear();
-    let i = 0;
-    for (let ring = 1; ring <= R && i < count; ring++) {
-      const perim = this._ringPerim(ring);
-      for (let s = 0; s < perim.length && i < count; s++) {
-        this._orbitOf.set(ids[i++], { ring, slot: s });
+  _nearestFreeCell(x, y, used) {
+    const maxR = Math.max(this.grid.cols, this.grid.rows);
+    for (let r = 1; r < maxR; r++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const nx = x + dx, ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= this.grid.cols || ny >= this.grid.rows) continue;
+          if (!used.has(this.grid.getCellKey(nx, ny))) return { x: nx, y: ny };
+        }
       }
     }
-
-    this._shapeMask = this._buildOrbitMask(cx, cy, R);
-    for (const id of ids) this._setOrbitTarget(id);
-  }
-
-  /** Ordered (clockwise) perimeter offsets of a square ring at Chebyshev=r. */
-  _ringPerim(r) {
-    const cached = this._ringPerimCache.get(r);
-    if (cached) return cached;
-    const p = [];
-    for (let x = -r; x <= r; x++) p.push({ dx: x, dy: -r });   // top L→R
-    for (let y = -r + 1; y <= r; y++) p.push({ dx: r, dy: y }); // right T→B
-    for (let x = r - 1; x >= -r; x--) p.push({ dx: x, dy: r });  // bottom R→L
-    for (let y = r - 1; y >= -r + 1; y--) p.push({ dx: -r, dy: y }); // left B→T
-    this._ringPerimCache.set(r, p);
-    return p;
-  }
-
-  _setOrbitTarget(id) {
-    const o = this._orbitOf.get(id);
-    if (!o) return;
-    const perim = this._ringPerim(o.ring);
-    const off = perim[((o.slot % perim.length) + perim.length) % perim.length];
-    const tx = Math.max(0, Math.min(this.grid.cols - 1, this._orbitCenter.x + off.dx));
-    const ty = Math.max(0, Math.min(this.grid.rows - 1, this._orbitCenter.y + off.dy));
-    this._wanderTargets.set(id, { tx, ty });
-  }
-
-  _advanceOrbitSlot(id) {
-    const o = this._orbitOf.get(id);
-    if (!o) return;
-    const len = this._ringPerim(o.ring).length;
-    o.slot = (((o.slot + this._orbitDir) % len) + len) % len;
-    this._setOrbitTarget(id);
+    return { x, y };
   }
 
   update(deltaTime) {
@@ -475,8 +507,6 @@ export class MotionEngine {
         this._dragMomentum = false;
       }
     }
-    if (this._orbit) this._orbitElapsed += deltaTime; // drives 逐渐加速
-
     const tick = this._effectiveTick();
     this.accumulatedTime += deltaTime;
     let ticks = 0;
@@ -500,11 +530,6 @@ export class MotionEngine {
    * 注意：这里切换的是"模态"速度，不是按拖拽瞬时速度变速，故仍满足匀速铁律。
    */
   _effectiveTick() {
-    if (this._orbit) {
-      // 逐渐加速：旋转 tick 由 orbitTickStart 渐缩到 orbitTickEnd。
-      const t = Math.min(1, this._orbitElapsed / this.orbitRampMs);
-      return this.orbitTickStart + (this.orbitTickEnd - this.orbitTickStart) * t;
-    }
     if (this._dragActive) return this.dragTickDuration;
     if (this._dragMomentum && this.dragBias) {
       const s = Math.max(0, Math.min(1, this.dragBias.strength));
@@ -594,12 +619,9 @@ export class MotionEngine {
 
         const target = this._wanderTargets.get(char.id);
         if (target && nx === target.tx && ny === target.ty) {
-          if (this._shapeConstraint === 'orbit' && this._orbitOf.has(char.id)) {
-            // 到达本环当前格 → 沿环推进一格（规整旋转，不随机停顿）。
-            this._advanceOrbitSlot(char.id);
-          } else if (this._shapeConstraint === 'flow' && this._shapeChars.has(char.id)) {
-            // 到达当前路径格 → 推进到下一格（少量随机停顿，增加生命感）。
-            if (Math.random() < 0.12) this._setFlowTarget(char.id); // pause one tick
+          if (this._shapeConstraint === 'flow' && this._flowOf.has(char.id)) {
+            // 到达当前路径格 → 推进一格（少量随机停顿，避免像弹簧一样单调）。
+            if (Math.random() < 0.08) this._setFlowTarget(char.id); // 偶尔停顿一拍（更自然）
             else this._advanceFlowIndex(char.id);
           } else {
             this._wanderTargets.delete(char.id);
@@ -621,10 +643,8 @@ export class MotionEngine {
         this._directionStreaks.set(char.id, 0);
 
         if (stuck > STUCK_LIMIT) {
-          if (this._shapeConstraint === 'orbit' && this._orbitOf.has(char.id)) {
-            this._advanceOrbitSlot(char.id); // 旋转受阻 → 跳到下一格绕过
-          } else if (this._shapeConstraint === 'flow' && this._shapeChars.has(char.id)) {
-            // 流动中被堵 → 跳到下一路径格绕过拥堵，保持单列推进不卡死。
+          if (this._shapeConstraint === 'flow' && this._flowOf.has(char.id)) {
+            // 流动中被堵 → 跳到下一路径格绕过拥堵，保持推进不卡死。
             this._advanceFlowIndex(char.id);
           } else {
             // Force a new target far away — PIBT will naturally find a way out
@@ -641,8 +661,8 @@ export class MotionEngine {
     }
 
     // During drag, keep shape characters alive inside the shifted mask.
-    // Flow/orbit self-drive via their own indices — skip the wander block.
-    if (this._shapeConstraint !== 'flow' && this._shapeConstraint !== 'orbit' &&
+    // Flow self-drives via flow indices — skip the wander block.
+    if (this._shapeConstraint !== 'flow' &&
         this.dragBias && this.dragBias.strength > 0.2) {
       for (const char of chars) {
         const stuck = this._stuckTicks.get(char.id) || 0;
