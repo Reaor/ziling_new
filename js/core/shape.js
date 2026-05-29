@@ -23,7 +23,8 @@
  * @license MIT
  */
 
-const FONT_STACK = '"PingFang SC", "Microsoft YaHei", "Heiti SC", sans-serif';
+const FONT_STACK = '"PingFang SC", "Microsoft YaHei", "Heiti SC", "Noto Sans CJK SC", sans-serif';
+const BOLD_FONT_STACK = '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Heiti SC", sans-serif';
 const SS = 6; // supersample factor per grid cell
 
 /* ================================================================
@@ -85,19 +86,20 @@ export class ShapeSystem {
    * @param {string} emojiKey — key from {@link EMOJI_TEMPLATES} (e.g. '^_^')
    * @param {number} gridCols
    * @param {number} gridRows
-   * @param {number} [maxChars=80]
+   * @param {number} [maxChars=96]
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
-  sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 80) {
+  sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 96) {
     const text = EMOJI_TEMPLATES[emojiKey] ? emojiKey : '^_^';
-    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.10, (ctx, W, H) => {
-      // 颜文字 are wide and short — fit mostly by width, keep a short band.
-      const fs = this._fitFont(ctx, text, W * 0.94, H * 0.6);
-      ctx.font = `${fs}px ${FONT_STACK}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(text, W / 2, H / 2);
+    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.075, (ctx, W, H) => {
+      // 颜文字 are wide and short.  Use a bold face plus a light stroke so
+      // narrow mouths ("_", "﹏", ".") survive downsampling instead of
+      // becoming a one-pixel hint.
+      const fs = this._fitFont(ctx, text, W * 0.96, H * 0.68);
+      this._drawTextMask(ctx, text, W / 2, H / 2, fs, {
+        weight: 700,
+        strokeWidth: Math.max(SS * 0.45, fs * 0.035),
+      });
     });
 
     this.currentMask = mask;
@@ -115,19 +117,18 @@ export class ShapeSystem {
    * @param {string} char
    * @param {number} gridCols
    * @param {number} gridRows
-   * @param {number} [maxChars=100]
+   * @param {number} [maxChars=140]
    * @param {'horizontal'|'vertical'} [direction='horizontal'] — reserved for
    *   multi-char 巨字 stacking; a single char always renders upright.
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
-  sampleMegachar(char, gridCols, gridRows, maxChars = 100, direction = 'horizontal') {
-    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.14, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, char, W * 0.9, H * 0.9);
-      ctx.font = `${fs}px ${FONT_STACK}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(char, W / 2, H / 2);
+  sampleMegachar(char, gridCols, gridRows, maxChars = 140, direction = 'horizontal') {
+    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.09, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, char, W * 0.92, H * 0.92);
+      this._drawTextMask(ctx, char, W / 2, H / 2, fs, {
+        weight: 800,
+        strokeWidth: Math.max(SS * 0.65, fs * 0.03),
+      });
     });
 
     this.currentMask = mask;
@@ -277,6 +278,25 @@ export class ShapeSystem {
     const w = ctx.measureText(text).width || 1;
     if (w > maxW) fs *= maxW / w;
     return Math.max(4, Math.floor(fs));
+  }
+
+  /**
+   * Draw text for mask extraction with explicit stroke+fill.  The visual layer
+   * still renders normal里字; this only thickens the invisible sampling stencil
+   * so small features do not disappear after cell downsampling.
+   * @private
+   */
+  _drawTextMask(ctx, text, x, y, fs, { weight = 700, strokeWidth = SS * 0.5 } = {}) {
+    ctx.font = `${weight} ${fs}px ${BOLD_FONT_STACK}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = '#ffffff';
+    ctx.fillStyle = '#ffffff';
+    ctx.lineWidth = strokeWidth;
+    if (strokeWidth > 0) ctx.strokeText(text, x, y);
+    ctx.fillText(text, x, y);
   }
 
   /**
