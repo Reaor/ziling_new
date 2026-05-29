@@ -31,14 +31,14 @@ const SCATTER_RESTORE_MS = 2500;
 const FADE_MS = 600;           // 里字自适应增减时的淡入/淡出时长
 const INITIAL_CHARS = 56;      // 首屏播种数（之后随形状自适应增减）
 const MIN_CHARS = 28;
-const MAX_CHARS = 112;
-// 形状掩码即字形本身（均匀采样）；里字只填满其中的 FILL_RATIO 比例，余下为
-// "空格"。有空格里字才能像华容道一样持续滑动，而非成形即冻结。填充率越高越易
-// 辨形、越低越灵动；strict（颜文字/巨字）填得更满保辨形，loose（曲线/花）更松。
-// 所有动态形状都让里字持续运动：留出空位，里字在掩码内华容道式滑动（轮廓与
-// 字数固定，但不静止）。strict（颜文字/巨字）填得较满保辨形，loose/flow 更松。
-const FILL_RATIO = { strict: 0.8, loose: 0.72, flow: 0.80 };
-const MICRO_AMP = 2.0;         // 亚像素微动幅度（px）：叠加在格子滑动之上的"呼吸"生命感
+const MAX_CHARS = 130;
+// 流动呈现：里字沿路径流动，约填满路径总格数的 FLOW_FILL，余下为流动所需空位。
+// 所有动态形状里字都持续运动、速率一致（绝不静止）。
+const FLOW_FILL = 0.82;
+// 微动：点击时随点击反应触发的一次性"轻摆"脉冲（全体一起做、随后衰减），
+// 不常驻（常驻会很乱）。MICRO_AMP=幅度(px)，MICRO_DECAY_MS=衰减时长。
+const MICRO_AMP = 3.0;
+const MICRO_DECAY_MS = 520;
 const BREAK_PROB = 0.3;        // 点击概率打破轮廓（里字散成自由云团再归位）
 const BREAK_RESTORE_MS = 1600;
 const CHAR_POOL = '天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏闰余成岁律吕调阳云腾致雨露结为霜'.split('');
@@ -67,21 +67,21 @@ document.addEventListener('DOMContentLoaded', () => {
   console.log(`PIBT ready — Grid ${gridCols}x${gridRows}, ${INITIAL_CHARS} characters`);
 
   // ── Shape catalogue (cycled by double-tap) ────────────────
-  // `cells` = 该形状采样后的目标掩码格数，反映其大小/复杂度；里字数随之自适应
-  // （复杂形状如颜文字/笔画多的汉字配更大的格数，才能拼清晰，收束 L33）。
-  // flow:true 的细轮廓用"沿轮廓流动"呈现（收束 L34）；其余用静态掩码 + 华容道游走。
+  // 统一为"流动呈现"：每个形状 make() 返回一组有序路径（paths）。
+  //   - 颜文字/巨字：每条笔画一条开放路径 → 里字实心填满并往返流动（收束 L34/L23）。
+  //   - 曲线/数学曲线：单条闭环路径 → 里字首尾相连绕圈流动。
+  // `cells` 控制采样分辨率（越大越清晰、字越多，收束 L33）。里字数随路径总格数自适应。
   const SHAPES = [
-    { name: '^_^',  constraint: 'strict', cells: 64,  make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
-    { name: '>_<',  constraint: 'strict', cells: 64,  make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
-    { name: '心',   constraint: 'strict', cells: 92,  make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
-    { name: '春',   constraint: 'strict', cells: 112, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
-    { name: '爱心', constraint: 'flow',   flow: true, cells: 64, make: n => shapes.sampleCurveOrdered('heart', gridCols, gridRows, n) },
-    { name: '四叶花', constraint: 'loose', cells: 92,  make: n => shapes.sampleCurve('rose', gridCols, gridRows, n) },
+    { name: '^_^',  cells: 70,  make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
+    { name: '>_<',  cells: 70,  make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
+    { name: '心',   cells: 96,  make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
+    { name: '春',   cells: 120, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
+    { name: '爱心', cells: 80,  make: n => shapes.sampleCurveOrdered('heart', gridCols, gridRows, n) },
+    { name: '四叶花', cells: 96, make: n => shapes.sampleCurveOrdered('rose', gridCols, gridRows, n) },
   ];
   let shapeIndex = 0;
   let shapeActive = false;
-  let currentMask = null;
-  let currentForm = null; // { flow, mask, constraint } —— 用于散开/打断后归位
+  let currentPaths = null; // 当前形状的路径（散开/打断/松手后据此归位）
 
   // ── 里字自适应（增生/减少以适应形状大小，收束 L4）──────────
   // fadeTarget===0 的里字正在淡出回收，不计入"在册"里字。
@@ -158,60 +158,59 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // 用当前形态（flow 或静态掩码）把在册里字重新约束成形。散开/打断后归位也用它。
+  const pathsCellCount = paths => paths.reduce((s, p) => s + p.cells.length, 0);
+
+  // 用当前形状的路径把在册里字约束成"流动呈现"。散开/打断/松手后归位都用它。
   function formCurrent() {
-    if (!currentForm) return;
+    if (!currentPaths) return;
     motion.releaseShape();
-    if (currentForm.flow) motion.setFlowPath(currentForm.mask, aliveIds());
-    else motion.setShapeMask(currentForm.mask, aliveIds(), currentForm.constraint);
+    motion.setFlowPaths(currentPaths, aliveIds());
   }
 
   function applyShape(index) {
     shapeIndex = ((index % SHAPES.length) + SHAPES.length) % SHAPES.length;
     const def = SHAPES[shapeIndex];
     const sampled = def.make(def.cells);
-    if (!sampled.mask || sampled.mask.length === 0) return;
-    const mask = sampled.mask;                  // 字形掩码（FPS 均匀 / flow 有序）
-    currentMask = mask;
-    currentForm = { flow: !!def.flow, mask, constraint: def.constraint };
+    const paths = sampled.paths;
+    if (!paths || paths.length === 0) return;
+    currentPaths = paths;
     shapeActive = true;
-    // 里字数随形状大小/复杂度自适应：约填满掩码的 FILL_RATIO，并始终至少留 4 个
-    // 空格供滑动/流动（避免满铺导致 PIBT 无空位可挪而卡死）。
-    const fill = FILL_RATIO[def.constraint] || 0.75;
-    const target = Math.min(Math.round(mask.length * fill), mask.length - 4);
-    adaptCharCount(target, mask);
+    // 里字数随形状路径总格数自适应：约填满 FLOW_FILL，余下为流动所需空位（收束 L33）。
+    const total = pathsCellCount(paths);
+    const target = Math.max(MIN_CHARS, Math.min(MAX_CHARS, Math.round(total * FLOW_FILL)));
+    adaptCharCount(target, paths.flatMap(p => p.cells));
     formCurrent();
-    console.log(`Shape → ${def.name} (${mask.length} cells, ${aliveIds().length}里字, ${def.constraint})`);
+    console.log(`Shape → ${def.name} (${paths.length} paths, ${total} cells, ${aliveIds().length}里字)`);
   }
 
   function releaseShape() {
     shapeActive = false;
-    currentMask = null;
-    currentForm = null;
+    currentPaths = null;
     motion.releaseShape();
     console.log('Shape released → free wander');
   }
 
   // Reconstrain里字 to the current shape (used after scatter / break restore).
   function reformShape() {
-    if (!shapeActive || !currentForm) return;
+    if (!shapeActive || !currentPaths) return;
     formCurrent();
   }
 
-  // 松手后在落点处还原形状：把当前形态整体平移到 (cx,cy) 附近再成形。
+  // 松手后在落点处还原形状：把所有路径整体平移到 (cx,cy) 附近再成形。
   function reformAt(cx, cy) {
-    if (!shapeActive || !currentForm) return;
-    const m = currentForm.mask;
+    if (!shapeActive || !currentPaths) return;
+    const all = currentPaths.flatMap(p => p.cells);
     let ax = 0, ay = 0;
-    for (const c of m) { ax += c.x; ay += c.y; }
-    ax = Math.round(ax / m.length); ay = Math.round(ay / m.length);
+    for (const c of all) { ax += c.x; ay += c.y; }
+    ax = Math.round(ax / all.length); ay = Math.round(ay / all.length);
     let sx = cx - ax, sy = cy - ay;
-    const xs = m.map(c => c.x), ys = m.map(c => c.y);
+    const xs = all.map(c => c.x), ys = all.map(c => c.y);
     sx = Math.max(-Math.min(...xs), Math.min(gridCols - 1 - Math.max(...xs), sx));
     sy = Math.max(-Math.min(...ys), Math.min(gridRows - 1 - Math.max(...ys), sy));
-    const moved = m.map(c => ({ x: c.x + sx, y: c.y + sy }));
-    currentForm = { ...currentForm, mask: moved };
-    currentMask = moved;
+    currentPaths = currentPaths.map(p => ({
+      loop: p.loop,
+      cells: p.cells.map(c => ({ x: c.x + sx, y: c.y + sy })),
+    }));
     formCurrent();
   }
 
@@ -220,13 +219,18 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── Drag state ────────────────────────────────────────────
   let dragging = false;
-  let dragEnd = null;    // last finger cell during a drag (release / reform spot)
+  let dragEnd = null;        // last finger cell (reform spot on release)
+  let orbitFinger = { x: 0, y: 0 }; // finger pixel pos driving the orbit
   let scatterTimer = null;
+  let microEnv = 0;          // 微动脉冲包络（点击触发→衰减）
+
+  const triggerMicro = () => { microEnv = 1; }; // 点击反应：全体来一次轻摆
 
   const gestures = new GestureRecognizer(renderer.canvas, CELL_SIZE, {
     onTap(col, row) {
       if (!shapeActive) return;
       clearTimeout(scatterTimer);
+      triggerMicro(); // 点击伴随的微动反应（全体一起轻摆一下）
       if (Math.random() < BREAK_PROB) {
         // 概率打破轮廓（收束 L32）：里字暂时散成自由云团（不按轮廓），稍后归位。
         motion.releaseShape();
@@ -242,6 +246,7 @@ document.addEventListener('DOMContentLoaded', () => {
     },
 
     onDoubleTap() {
+      triggerMicro();
       applyShape(shapeIndex + 1);
     },
 
@@ -249,20 +254,21 @@ document.addEventListener('DOMContentLoaded', () => {
       releaseShape();
     },
 
-    // 拖动 = 贪吃蛇环绕（收束 L30）：里字聚成绕手指的方环并旋转流动，跟手移动；
-    // 松手在落点还原之前的形状。
-    onDragStart(col, row) {
+    // 拖动（收束 L30）：里字聚成方形，按同心方环逐层旋转、越拖越快；中心=手指、
+    // 整块跟手平移；松手在落点还原之前的形状。由显示层驱动（见渲染循环）。
+    onDragStart(col, row, px, py) {
       if (!shapeActive) return;
       dragging = true;
       dragEnd = { col, row };
+      orbitFinger = { x: px, y: py };
       clearTimeout(scatterTimer);
-      motion.beginOrbit(col, row);
+      motion.startOrbit(aliveIds(), px, py);
     },
 
-    onDragMove(col, row) {
+    onDragMove(col, row, px, py) {
       if (!dragging) return;
       dragEnd = { col, row };
-      motion.moveOrbit(col, row);
+      orbitFinger = { x: px, y: py };
     },
 
     onDragEnd() {
@@ -298,9 +304,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     renderer.clear();
-    motion.update(dtMs);
-    motion.updateDisplayPositions(motion.tickProgress);
+    if (motion.isOrbiting()) {
+      // 拖动环绕：显示层直接驱动（连续旋转 + 整块跟手平移），绕开 PIBT。
+      motion.updateOrbitDisplay(dtMs, orbitFinger.x, orbitFinger.y);
+    } else {
+      motion.update(dtMs);
+      motion.updateDisplayPositions(motion.tickProgress);
+    }
     stepFades(dtMs);
+    if (microEnv > 0) microEnv = Math.max(0, microEnv - dtMs / MICRO_DECAY_MS);
 
     if (DEBUG) {
       const checkSec = Math.floor(now / 5000);
@@ -315,13 +327,14 @@ document.addEventListener('DOMContentLoaded', () => {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#e0e0e0';
-    // 亚像素微动：固定阵型（如颜文字/巨字满铺）靠它呈现"呼吸/轻摆"的生命感，
-    // 让里字看起来全员在动而不破坏形状清晰度（位移 < 半格，绝不重叠）。
+    // 微动：点击触发的一次性"轻摆"脉冲（microEnv 由 1 衰减到 0），全体里字一起
+    // 抖一下作为点击反应；平时为 0（不常驻，避免画面乱）。拖动时不叠加。
     const tSec = now / 1000;
+    const amp = motion.isOrbiting() ? 0 : microEnv * MICRO_AMP;
     for (const char of pool.getAll()) {
       if (char.alpha > 0.01) {
-        const mx = Math.sin(tSec * 1.7 + char.id * 1.3) * MICRO_AMP;
-        const my = Math.cos(tSec * 1.4 + char.id * 2.1) * MICRO_AMP;
+        const mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
+        const my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
         ctx.globalAlpha = char.alpha;
         ctx.fillText(char.char,
           char.displayX + CELL_SIZE / 2 + mx,

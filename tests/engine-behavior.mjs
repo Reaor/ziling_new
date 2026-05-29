@@ -673,51 +673,116 @@ function testFlowStreamsAlongPathStayingOnTrack() {
   assert.ok(onPath / samples >= 0.95, `flow should stay on the outline, onPath ${(onPath / samples).toFixed(2)}`);
 }
 
-// Regression: 拖动环绕 —— beginOrbit 把里字收拢到手指周围环绕流动，moveOrbit
-// 跟随手指；全员持续运动、无重叠脱同步。
+// Regression: 拖动环绕（显示层驱动）—— startOrbit 把里字聚到手指像素周围、按方块
+// 旋转；updateOrbitDisplay 持续旋转并跟随手指；里字始终聚拢在手指附近且在转动；
+// endOrbit 把里字落到互不重叠的格子。
 function testOrbitClustersAroundFingerAndFollows() {
   const grid = new Grid(24, 43);
   const pool = new CharacterPool(200);
   const motion = new MotionEngine(grid, 16, 0);
+  const cell = 16;
   const chars = [];
   for (let i = 0; i < 45; i++) {
     const c = pool.acquire('字', 2 + (i % 18), 2 + Math.floor(i / 18));
     chars.push(c);
     motion.registerCharacter(c);
   }
-  // Pretend a shape is active so orbit uses these as its participants.
-  motion.setShapeMask([{ x: 10, y: 10 }], chars.map(c => c.id), 'strict');
 
-  let fx = 12, fy = 20;
-  motion.beginOrbit(fx, fy);
-  const moves = new Map(chars.map(c => [c.id, 0]));
-  let near = 0, samples = 0;
+  let fx = 12 * cell, fy = 20 * cell;
+  motion.startOrbit(chars.map(c => c.id), fx, fy);
+  assert.equal(motion.isOrbiting(), true);
+
+  const prev = new Map();
+  let moved = 0, movedSamples = 0, near = 0, samples = 0;
   for (let t = 0; t < 120; t++) {
-    if (t > 0 && t % 20 === 0) { fx = Math.min(20, fx + 2); motion.moveOrbit(fx, fy); }
+    if (t > 0 && t % 20 === 0) fx = Math.min(20 * cell, fx + 2 * cell); // drag right
+    motion.updateOrbitDisplay(16, fx, fy);
+    for (const c of chars) {
+      const cx = c.displayX + cell / 2, cy = c.displayY + cell / 2;
+      if (t > 30) {
+        samples++;
+        if (Math.hypot(cx - fx, cy - fy) <= 8 * cell) near++;
+        const p = prev.get(c.id);
+        if (p) { movedSamples++; if (Math.hypot(cx - p.x, cy - p.y) > 0.5) moved++; }
+      }
+      prev.set(c.id, { x: cx, y: cy });
+    }
+  }
+  assert.ok(near / samples >= 0.95, `orbit should cluster里字 around the finger, near ${(near / samples).toFixed(2)}`);
+  assert.ok(moved / movedSamples >= 0.9, `orbit should keep里字 rotating, moved ${(moved / movedSamples).toFixed(2)}`);
+
+  motion.endOrbit();
+  assert.equal(motion.isOrbiting(), false);
+  const occupied = new Set();
+  for (const c of chars) {
+    const k = `${c.gridX},${c.gridY}`;
+    assert.equal(occupied.has(k), false, `endOrbit must place里字 on distinct cells (${k})`);
+    occupied.add(k);
+    assert.equal(grid.getCharId(c.gridX, c.gridY), c.id, `endOrbit grid sync ${c.id}`);
+  }
+}
+
+// Regression: 开放笔画的往返流动 —— 多条里字在一条线性路径上同向 slosh，始终在
+// 路径上、无重叠、全员持续移动（不卡死）。
+function testOpenStrokePingPongFlowKeepsMoving() {
+  const grid = new Grid(24, 43);
+  const pool = new CharacterPool(200);
+  const motion = new MotionEngine(grid, 16, 0);
+  const stroke = [];
+  for (let x = 4; x < 20; x++) stroke.push({ x, y: 10 }); // 16-cell horizontal stroke
+  const chars = [];
+  for (let i = 0; i < 11; i++) { // 11 chars on 16 cells → gaps to slosh
+    const c = pool.acquire('字', 2 + (i % 18), 2 + Math.floor(i / 18));
+    chars.push(c);
+    motion.registerCharacter(c);
+  }
+  motion.setFlowPaths([{ cells: stroke, loop: false }], chars.map(c => c.id));
+  const onPathSet = new Set(stroke.map(c => `${c.x},${c.y}`));
+  const moves = new Map(chars.map(c => [c.id, 0]));
+  let onPath = 0, samples = 0;
+
+  for (let t = 0; t < 200; t++) {
     const before = new Map(chars.map(c => [c.id, `${c.gridX},${c.gridY}`]));
-    motion.update(85);
+    motion.update(150);
     const seen = new Set();
     for (const c of chars) {
       const k = `${c.gridX},${c.gridY}`;
-      assert.equal(seen.has(k), false, `orbit duplicate ${k} at ${t}`);
+      assert.equal(seen.has(k), false, `pingpong duplicate ${k} at ${t}`);
       seen.add(k);
-      assert.equal(grid.getCharId(c.gridX, c.gridY), c.id, `orbit desync ${c.id} at ${t}`);
       if (before.get(c.id) !== k) moves.set(c.id, moves.get(c.id) + 1);
-      if (t > 40) {
-        samples++;
-        const cheb = Math.max(Math.abs(c.gridX - fx), Math.abs(c.gridY - fy));
-        if (cheb <= 6) near++;
-      }
+      if (t > 40) { samples++; if (onPathSet.has(k)) onPath++; }
     }
   }
   const mv = [...moves.values()].sort((a, b) => a - b);
-  assert.ok(mv[0] >= 30, `orbit should keep every里字 circulating, min moves ${mv[0]}`);
-  assert.ok(near / samples >= 0.9, `orbit should keep里字 around the finger, near ${(near / samples).toFixed(2)}`);
+  assert.ok(mv[0] >= 15, `ping-pong flow should keep every里字 moving, min moves ${mv[0]}`);
+  assert.ok(onPath / samples >= 0.95, `ping-pong里字 should stay on the stroke, onPath ${(onPath / samples).toFixed(2)}`);
+}
+
+// Regression: mask → stroke paths splits into connected components, each path
+// covering exactly its component's cells (so flow can fill every笔画).
+function testMaskToPathsSplitsComponentsAndCoversCells() {
+  const shapes = new ShapeSystem();
+  const cols = 24;
+  const cells = [];
+  for (let x = 2; x < 6; x++) for (let y = 2; y < 6; y++) cells.push({ x, y }); // blob A (4x4)
+  for (let x = 12; x < 15; x++) for (let y = 8; y < 11; y++) cells.push({ x, y }); // blob B (3x3)
+  const paths = shapes._maskToPaths(cells, cols);
+
+  assert.equal(paths.length, 2, 'two disjoint blobs → two stroke paths');
+  const total = paths.reduce((s, p) => s + p.cells.length, 0);
+  assert.equal(total, cells.length, 'paths cover every mask cell exactly once');
+  for (const p of paths) {
+    const uniq = new Set(p.cells.map(c => `${c.x},${c.y}`));
+    assert.equal(uniq.size, p.cells.length, 'no duplicate cells within a path');
+    assert.equal(p.loop, false, 'stroke paths are open (ping-pong)');
+  }
 }
 
 await testDoubleTapUsesGridCoordinates();
 await testSingleTapFiresImmediately();
+testMaskToPathsSplitsComponentsAndCoversCells();
 testFlowStreamsAlongPathStayingOnTrack();
+testOpenStrokePingPongFlowKeepsMoving();
 testOrbitClustersAroundFingerAndFollows();
 testDragProducesRelativeMotionNotRigidTranslation();
 testDynamicCharacterCountStaysCollisionFreeAndInSync();

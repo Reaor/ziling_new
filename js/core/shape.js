@@ -102,8 +102,9 @@ export class ShapeSystem {
 
     this.currentMask = mask;
     this.currentShape = emojiKey;
-    this.constraintType = 'strict';
-    return { mask, constraint: 'strict' };
+    this.constraintType = 'flow';
+    // 拆成每条笔画的有序路径（往返流动），让全体里字实心填满字形并持续运动。
+    return { mask, paths: this._maskToPaths(mask, gridCols), constraint: 'flow' };
   }
 
   /* ----------------------------------------------------------
@@ -132,8 +133,8 @@ export class ShapeSystem {
 
     this.currentMask = mask;
     this.currentShape = char;
-    this.constraintType = 'strict';
-    return { mask, constraint: 'strict' };
+    this.constraintType = 'flow';
+    return { mask, paths: this._maskToPaths(mask, gridCols), constraint: 'flow' };
   }
 
   /* ----------------------------------------------------------
@@ -248,7 +249,77 @@ export class ShapeSystem {
     this.currentMask = mask;
     this.currentShape = type;
     this.constraintType = 'flow';
-    return { mask, constraint: 'flow', ordered: true };
+    // 曲线/数学曲线 → 单条闭环路径，里字首尾相连绕圈流动。
+    return { mask, paths: [{ cells: mask, loop: true }], constraint: 'flow', ordered: true };
+  }
+
+  /* ----------------------------------------------------------
+   *  MASK → STROKE PATHS（连通分量 + 最近邻链）
+   * ---------------------------------------------------------- */
+
+  /**
+   * 把一组掩码格子拆成"笔画路径"：先按 4-连通分出各笔画，再用最近邻链把每条
+   * 笔画的格子排成一条有序路径（往返流动用）。纯函数，可测。
+   * @param {Array<{x,y}>} cells
+   * @param {number} cols
+   * @returns {Array<{cells:Array<{x,y}>, loop:boolean}>}
+   */
+  _maskToPaths(cells, cols) {
+    if (!cells || cells.length === 0) return [];
+    const key = (x, y) => y * cols + x;
+    const remaining = new Map();
+    for (const c of cells) remaining.set(key(c.x, c.y), c);
+
+    // 4-connected components via flood fill.
+    const components = [];
+    const seen = new Set();
+    for (const c of cells) {
+      const k0 = key(c.x, c.y);
+      if (seen.has(k0)) continue;
+      const comp = [];
+      const stack = [c];
+      seen.add(k0);
+      while (stack.length) {
+        const cur = stack.pop();
+        comp.push(cur);
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nk = key(cur.x + dx, cur.y + dy);
+          if (remaining.has(nk) && !seen.has(nk)) {
+            seen.add(nk);
+            stack.push(remaining.get(nk));
+          }
+        }
+      }
+      components.push(comp);
+    }
+
+    return components.map(comp => ({ cells: this._nnChain(comp), loop: false }));
+  }
+
+  /**
+   * Order a component's cells into a single chain by greedy nearest-neighbour
+   * (start at the top-left), so流动 can slosh里字 back and forth along it.
+   * @private
+   */
+  _nnChain(comp) {
+    if (comp.length <= 2) return comp.slice();
+    const left = comp.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
+    const start = left[0];
+    const pool = new Set(comp);
+    pool.delete(start);
+    const chain = [start];
+    let cur = start;
+    while (pool.size) {
+      let best = null, bestD = Infinity;
+      for (const c of pool) {
+        const d = Math.abs(c.x - cur.x) + Math.abs(c.y - cur.y);
+        if (d < bestD) { bestD = d; best = c; }
+      }
+      chain.push(best);
+      pool.delete(best);
+      cur = best;
+    }
+    return chain;
   }
 
   /* ----------------------------------------------------------
