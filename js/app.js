@@ -26,15 +26,16 @@ import { GestureRecognizer } from './input/gestures.js';
 
 const CELL_SIZE = 16;
 const FONT_SIZE = 13;
-const CHAR_COUNT = 64;         // number of里字 on screen
 const TICK_MS = 200;           // 常速 tick —— 匀速铁律（拖动期由引擎自行提速跟手）
 const SCATTER_RESTORE_MS = 2500;
-// 形状掩码故意比里字数大，留出"空格"。里字填不满掩码 → 像华容道一样有空位
-// 可滑动，整片形状才能持续匀速运动而非成形即冻结。填充率越高越易辨形、越低越
-// 灵动；strict（颜文字/巨字）填得更满保辨形，loose（曲线/花）更松更自由。
+const FADE_MS = 600;           // 里字自适应增减时的淡入/淡出时长
+const INITIAL_CHARS = 56;      // 首屏播种数（之后随形状自适应增减）
+const MIN_CHARS = 28;
+const MAX_CHARS = 112;
+// 形状掩码即字形本身（均匀采样）；里字只填满其中的 FILL_RATIO 比例，余下为
+// "空格"。有空格里字才能像华容道一样持续滑动，而非成形即冻结。填充率越高越易
+// 辨形、越低越灵动；strict（颜文字/巨字）填得更满保辨形，loose（曲线/花）更松。
 const FILL_RATIO = { strict: 0.82, loose: 0.72 };
-const maskCellsFor = constraint =>
-  Math.max(CHAR_COUNT + 6, Math.round(CHAR_COUNT / (FILL_RATIO[constraint] || 0.75)));
 const CHAR_POOL = '天地玄黄宇宙洪荒日月盈昃辰宿列张寒来暑往秋收冬藏闰余成岁律吕调阳云腾致雨露结为霜'.split('');
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -50,59 +51,120 @@ document.addEventListener('DOMContentLoaded', () => {
   const shapes = new ShapeSystem();
 
   // ── Seed characters in a loose central block ──────────────
-  for (let i = 0; i < CHAR_COUNT; i++) {
-    const col = 2 + (i % 20);
-    const row = 2 + Math.floor(i / 20);
-    const c = pool.acquire(CHAR_POOL[i % CHAR_POOL.length], col, row);
+  let glyphSeq = 0;
+  const nextGlyph = () => CHAR_POOL[(glyphSeq++) % CHAR_POOL.length];
+  for (let i = 0; i < INITIAL_CHARS; i++) {
+    const col = 2 + (i % 18);
+    const row = 2 + Math.floor(i / 18);
+    const c = pool.acquire(nextGlyph(), col, row);
     motion.registerCharacter(c);
   }
-  console.log(`PIBT ready — Grid ${gridCols}x${gridRows}, ${CHAR_COUNT} characters`);
+  console.log(`PIBT ready — Grid ${gridCols}x${gridRows}, ${INITIAL_CHARS} characters`);
 
   // ── Shape catalogue (cycled by double-tap) ────────────────
-  // 每个形状采样为 `cells` 个掩码格（> CHAR_COUNT），里字只填满其中一部分，
-  // 余下空格供华容道式滑动 —— 这样成形后里字仍持续运动且形状清晰可辨。
+  // `cells` = 该形状采样后的目标掩码格数，反映其大小/复杂度；里字数随之自适应。
+  // 双击循环切换，便于直接对比不同形态的辨形与字数增减效果。
   const SHAPES = [
-    { name: '^_^',  constraint: 'strict', make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
-    { name: '心',   constraint: 'strict', make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
-    { name: '春',   constraint: 'strict', make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
-    { name: '爱心', constraint: 'loose',  make: n => shapes.sampleCurve('heart', gridCols, gridRows, n) },
-    { name: '四叶花', constraint: 'loose', make: n => shapes.sampleCurve('rose', gridCols, gridRows, n) },
+    { name: '^_^',  constraint: 'strict', cells: 58,  make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
+    { name: '>_<',  constraint: 'strict', cells: 58,  make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
+    { name: '心',   constraint: 'strict', cells: 84,  make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
+    { name: '春',   constraint: 'strict', cells: 100, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
+    { name: '爱心', constraint: 'loose',  cells: 70,  make: n => shapes.sampleCurve('heart', gridCols, gridRows, n) },
+    { name: '四叶花', constraint: 'loose', cells: 92,  make: n => shapes.sampleCurve('rose', gridCols, gridRows, n) },
   ];
   let shapeIndex = 0;
   let shapeActive = false;
   let currentMask = null;
 
-  // Grow a sparse mask outward until it has exactly `count` cells.
-  function padMask(mask, count) {
-    if (mask.length >= count) return mask.slice(0, count);
-    const key = (x, y) => y * gridCols + x;
-    const seen = new Set(mask.map(c => key(c.x, c.y)));
-    const out = mask.slice();
-    const ring = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]];
-    for (let i = 0; out.length < count && i < out.length; i++) {
-      for (const [dx, dy] of ring) {
-        const x = out[i].x + dx, y = out[i].y + dy;
-        if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) continue;
-        if (seen.has(key(x, y))) continue;
-        seen.add(key(x, y));
-        out.push({ x, y });
-        if (out.length >= count) break;
+  // ── 里字自适应（增生/减少以适应形状大小，收束 L4）──────────
+  // fadeTarget===0 的里字正在淡出回收，不计入"在册"里字。
+  const aliveChars = () => pool.getAll().filter(c => c.fadeTarget !== 0);
+  const aliveIds = () => aliveChars().map(c => c.id);
+
+  // 从画布边缘找一个空格让新里字淡入（首次/需要增生时）。
+  function spawnEdgeChar() {
+    const edge = [];
+    for (let x = 0; x < gridCols; x++) { edge.push([x, 0]); edge.push([x, gridRows - 1]); }
+    for (let y = 1; y < gridRows - 1; y++) { edge.push([0, y]); edge.push([gridCols - 1, y]); }
+    for (let i = edge.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      [edge[i], edge[j]] = [edge[j], edge[i]];
+    }
+    const cell = edge.find(([x, y]) => !grid.isOccupied(x, y));
+    if (!cell) return null;
+    const c = pool.acquire(nextGlyph(), cell[0], cell[1]);
+    c.alpha = 0;
+    c.fadeTarget = 1;
+    motion.registerCharacter(c);
+    return c;
+  }
+
+  // 里字淡出时给它一个最近边缘的目标，让它漂出画布再回收。
+  function edgeTargetFor(c) {
+    const left = c.gridX, right = gridCols - 1 - c.gridX;
+    const top = c.gridY, bottom = gridRows - 1 - c.gridY;
+    const m = Math.min(left, right, top, bottom);
+    if (m === left) return [0, c.gridY];
+    if (m === right) return [gridCols - 1, c.gridY];
+    if (m === top) return [c.gridX, 0];
+    return [c.gridX, gridRows - 1];
+  }
+
+  // 调整在册里字数到 target：不足则边缘淡入，过多则淡出离场（挑离形状中心最远者）。
+  function adaptCharCount(target, mask) {
+    target = Math.max(MIN_CHARS, Math.min(MAX_CHARS, target));
+    const alive = aliveChars();
+    const diff = target - alive.length;
+    if (diff > 0) {
+      for (let k = 0; k < diff; k++) spawnEdgeChar();
+    } else if (diff < 0) {
+      let cx = 0, cy = 0;
+      for (const cell of mask) { cx += cell.x; cy += cell.y; }
+      cx /= mask.length; cy /= mask.length;
+      const victims = alive
+        .map(c => ({ c, d: (c.gridX - cx) ** 2 + (c.gridY - cy) ** 2 }))
+        .sort((a, b) => b.d - a.d)
+        .slice(0, -diff)
+        .map(o => o.c);
+      for (const c of victims) {
+        c.fadeTarget = 0;
+        motion.freeFromShape(c.id);
+        const [tx, ty] = edgeTargetFor(c);
+        motion.setTarget(c.id, tx, ty);
       }
     }
-    return out;
+  }
+
+  // 推进淡入/淡出；淡出至 0 的里字回收。每帧调用。
+  function stepFades(dtMs) {
+    const rate = dtMs / FADE_MS;
+    for (const c of pool.getAll()) {
+      if (c.alpha < c.fadeTarget) {
+        c.alpha = Math.min(c.fadeTarget, c.alpha + rate);
+      } else if (c.alpha > c.fadeTarget) {
+        c.alpha = Math.max(c.fadeTarget, c.alpha - rate);
+        if (c.fadeTarget === 0 && c.alpha <= 0.02) {
+          motion.unregisterCharacter(c.id);
+          pool.release(c.id);
+        }
+      }
+    }
   }
 
   function applyShape(index) {
     shapeIndex = ((index % SHAPES.length) + SHAPES.length) % SHAPES.length;
-    const want = maskCellsFor(SHAPES[shapeIndex].constraint);
-    const sampled = SHAPES[shapeIndex].make(want);
+    const def = SHAPES[shapeIndex];
+    const sampled = def.make(def.cells);
     if (!sampled.mask || sampled.mask.length === 0) return;
-    const mask = padMask(sampled.mask, want);
+    const mask = sampled.mask;                  // 自然字形掩码（FPS 均匀采样）
     currentMask = mask;
     shapeActive = true;
+    // 里字数随形状大小自适应：约填满掩码的 FILL_RATIO，余下为华容道空格。
+    const target = Math.round(mask.length * (FILL_RATIO[def.constraint] || 0.75));
+    adaptCharCount(target, mask);
     motion.releaseShape();
-    motion.setShapeMask(mask, pool.getAll().map(c => c.id), SHAPES[shapeIndex].constraint);
-    console.log(`Shape → ${SHAPES[shapeIndex].name} (${mask.length} cells, ${SHAPES[shapeIndex].constraint})`);
+    motion.setShapeMask(mask, aliveIds(), def.constraint);
+    console.log(`Shape → ${def.name} (${mask.length} cells, ${aliveIds().length}里字, ${def.constraint})`);
   }
 
   function releaseShape() {
@@ -115,7 +177,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Reconstrain里字 to the current shape (used after scatter restore).
   function reformShape() {
     if (!shapeActive || !currentMask) return;
-    motion.setShapeMask(currentMask, pool.getAll().map(c => c.id), SHAPES[shapeIndex].constraint);
+    motion.setShapeMask(currentMask, aliveIds(), SHAPES[shapeIndex].constraint);
   }
 
   // Form the first shape shortly after load.
@@ -130,7 +192,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const gestures = new GestureRecognizer(renderer.canvas, CELL_SIZE, {
     onTap(col, row) {
       // Scatter里字 near the tap, then drift them home.
-      for (const char of pool.getAll()) {
+      for (const char of aliveChars()) {
         const dist = Math.abs(char.gridX - col) + Math.abs(char.gridY - row);
         if (dist <= 3) motion.scatter(char.id, col, row);
       }
@@ -218,6 +280,7 @@ document.addEventListener('DOMContentLoaded', () => {
     renderer.clear();
     motion.update(dtMs);
     motion.updateDisplayPositions(motion.tickProgress);
+    stepFades(dtMs);
 
     if (DEBUG) {
       const checkSec = Math.floor(now / 5000);

@@ -4,6 +4,7 @@ import { Grid } from '../js/core/grid.js';
 import { CharacterPool } from '../js/core/character.js';
 import { MotionEngine } from '../js/core/motion.js';
 import { GestureRecognizer } from '../js/input/gestures.js';
+import { ShapeSystem } from '../js/core/shape.js';
 
 class FakeCanvas {
   constructor() {
@@ -493,7 +494,127 @@ function testScatterMovesCharacterOutOfStrictFormation() {
     'scattered里字 should slide away from its formation cell');
 }
 
+// Regression: 拖动时里字应沿各自路径翻涌（彼此相对运动），而非整体刚性平移。
+function testDragProducesRelativeMotionNotRigidTranslation() {
+  const grid = new Grid(24, 43);
+  const pool = new CharacterPool(200);
+  const motion = new MotionEngine(grid, 16, 0);
+  const chars = [];
+  for (let i = 0; i < 50; i++) {
+    const c = pool.acquire('字', 2 + (i % 18), 2 + Math.floor(i / 18));
+    chars.push(c);
+    motion.registerCharacter(c);
+  }
+  const mask = [];
+  for (let y = 10; y < 18; y++) for (let x = 6; x < 16; x++) mask.push({ x, y });
+  motion.setShapeMask(mask, chars.map(c => c.id), 'loose');
+  for (let t = 0; t < 40; t++) motion.update(200); // settle into shape
+
+  const a = chars[0], b = chars[1];
+  motion.beginShapeDrag();
+  let relChanges = 0;
+  let prevRel = `${a.gridX - b.gridX},${a.gridY - b.gridY}`;
+  for (let t = 0; t < 30; t++) {
+    motion.dragBias = { dx: 1, dy: 0, strength: 1 };
+    motion.previewShapeDrag(Math.min(8, t), 0);
+    motion.update(85);
+    const rel = `${a.gridX - b.gridX},${a.gridY - b.gridY}`;
+    if (rel !== prevRel) { relChanges++; prevRel = rel; }
+  }
+  assert.ok(relChanges >= 5,
+    `drag should give里字 individual paths (relative motion), changes=${relChanges}`);
+}
+
+// Regression: 字数自适应 —— 运行中增删里字后，PIBT 仍保持无重叠、网格不脱同步。
+function testDynamicCharacterCountStaysCollisionFreeAndInSync() {
+  const grid = new Grid(24, 43);
+  const pool = new CharacterPool(200);
+  const motion = new MotionEngine(grid, 16, 0);
+  for (let i = 0; i < 56; i++) {
+    const c = pool.acquire('字', 2 + (i % 18), 2 + Math.floor(i / 18));
+    motion.registerCharacter(c);
+  }
+  const assertConsistent = label => {
+    const seen = new Set();
+    for (const c of pool.getAll()) {
+      const k = `${c.gridX},${c.gridY}`;
+      assert.equal(seen.has(k), false, `duplicate cell ${k} (${label})`);
+      seen.add(k);
+      assert.equal(grid.getCharId(c.gridX, c.gridY), c.id, `grid desync ${c.id} (${label})`);
+    }
+  };
+
+  const spawnEdge = () => {
+    for (let x = 0; x < grid.cols; x++) {
+      for (const y of [0, grid.rows - 1]) {
+        if (!grid.isOccupied(x, y)) {
+          const c = pool.acquire('新', x, y);
+          motion.registerCharacter(c);
+          return c;
+        }
+      }
+    }
+    return null;
+  };
+
+  for (let t = 0; t < 20; t++) motion.update(200);
+  assertConsistent('settle');
+  for (let k = 0; k < 12; k++) spawnEdge();
+  for (let t = 0; t < 20; t++) motion.update(200);
+  assert.equal(pool.count(), 68);
+  assertConsistent('after grow');
+  for (const c of pool.getAll().slice(0, 12)) {
+    motion.unregisterCharacter(c.id);
+    pool.release(c.id);
+  }
+  for (let t = 0; t < 20; t++) motion.update(200);
+  assert.equal(pool.count(), 56);
+  assertConsistent('after shrink');
+}
+
+// Regression: FPS 均匀采样要均匀覆盖字形，且保留"嘴"这类孤立细笔画（辨形），
+// 旧的一维等距抽稀会几乎把这类稀疏特征抽空。
+function testUniformSamplingKeepsSparseFeaturesAndSpread() {
+  const shapes = new ShapeSystem();
+  const cells = [];
+  for (let y = 0; y < 14; y++) for (let x = 0; x < 30; x++) cells.push({ x, y }); // 眼/脸大块
+  for (let x = 8; x < 22; x++) cells.push({ x, y: 22 });                          // 孤立"嘴"带
+  const K = 60;
+  const out = shapes._sparsify(cells, K);
+
+  assert.equal(out.length, K, 'should thin to exactly K cells');
+  const keys = new Set(out.map(c => `${c.x},${c.y}`));
+  assert.equal(keys.size, K, 'no duplicate cells');
+  const inputKeys = new Set(cells.map(c => `${c.x},${c.y}`));
+  for (const c of out) assert.ok(inputKeys.has(`${c.x},${c.y}`), 'samples come from input');
+
+  const mouth = out.filter(c => c.y === 22).length;
+  assert.ok(mouth >= 3, `uniform sampling must keep the isolated mouth band, got ${mouth}`);
+
+  // Average nearest-neighbour distance should beat naive 1-D equidistant thinning.
+  const avgNN = pts => {
+    let total = 0;
+    for (const p of pts) {
+      let best = Infinity;
+      for (const q of pts) {
+        if (p === q) continue;
+        const d = Math.abs(p.x - q.x) + Math.abs(p.y - q.y);
+        if (d < best) best = d;
+      }
+      total += best;
+    }
+    return total / pts.length;
+  };
+  const step = cells.length / K, naive = [];
+  for (let i = 0; i < K; i++) naive.push(cells[Math.floor(i * step)]);
+  assert.ok(avgNN(out) > avgNN(naive),
+    `FPS spread (${avgNN(out).toFixed(2)}) should exceed 1-D (${avgNN(naive).toFixed(2)})`);
+}
+
 await testDoubleTapUsesGridCoordinates();
+testDragProducesRelativeMotionNotRigidTranslation();
+testDynamicCharacterCountStaysCollisionFreeAndInSync();
+testUniformSamplingKeepsSparseFeaturesAndSpread();
 testStrictShapeKeepsAllCharactersMovingAndHoldsForm();
 testDragRunsFasterTickThenEasesBack();
 testScatterMovesCharacterOutOfStrictFormation();

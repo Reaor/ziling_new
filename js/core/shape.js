@@ -259,14 +259,52 @@ export class ShapeSystem {
   }
 
   /**
-   * Evenly thin `cells` down to at most `maxChars`, preserving spatial spread.
+   * Thin `cells` down to at most `maxChars` with **spatially uniform** spread
+   * using farthest-point sampling (FPS).
+   *
+   * 旧实现按一维 row-major 序等距抽取，二维上疏密不均 —— 颜文字"眼睛"像素多
+   * 的区域会分到过多采样点、"嘴"等细笔画几乎被抽空，导致难以辨形。FPS 每次
+   * 选离已选集合最远的点，能让采样点均匀覆盖整个字形（细笔画也保有代表点），
+   * 显著改善辨形。结果是确定性的（以最接近质心的点为种子）。
    * @private
    */
   _sparsify(cells, maxChars) {
     if (cells.length <= maxChars) return cells;
-    const step = cells.length / maxChars;
-    const out = [];
-    for (let i = 0; i < maxChars; i++) out.push(cells[Math.floor(i * step)]);
+    const n = cells.length;
+
+    // Seed: the cell closest to the centroid (deterministic).
+    let cx = 0, cy = 0;
+    for (const c of cells) { cx += c.x; cy += c.y; }
+    cx /= n; cy /= n;
+    let seed = 0, seedD = Infinity;
+    for (let i = 0; i < n; i++) {
+      const dx = cells[i].x - cx, dy = cells[i].y - cy;
+      const d = dx * dx + dy * dy;
+      if (d < seedD) { seedD = d; seed = i; }
+    }
+
+    const chosen = new Uint8Array(n);
+    chosen[seed] = 1;
+    const out = [cells[seed]];
+    // minD[i] = squared distance from cell i to the nearest chosen cell.
+    const minD = new Float64Array(n).fill(Infinity);
+    let last = seed;
+
+    for (let k = 1; k < maxChars; k++) {
+      const lx = cells[last].x, ly = cells[last].y;
+      let far = -1, farD = -1;
+      for (let i = 0; i < n; i++) {
+        if (chosen[i]) continue;
+        const dx = cells[i].x - lx, dy = cells[i].y - ly;
+        const d = dx * dx + dy * dy;
+        if (d < minD[i]) minD[i] = d;
+        if (minD[i] > farD) { farD = minD[i]; far = i; }
+      }
+      if (far === -1) break;
+      chosen[far] = 1;
+      out.push(cells[far]);
+      last = far;
+    }
     return out;
   }
 }

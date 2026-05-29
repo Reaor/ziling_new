@@ -237,7 +237,20 @@ export class MotionEngine {
 
     this._shapeMask = shifted;
     this._lastShapeDragShift = { col: shiftCol, row: shiftRow };
-    this._assignShapeDragTargets();
+
+    // 不再做"全体刚性槽位重排"（那会让里字像整体平移、彼此相对静止）。
+    // 只把那些目标已被甩出新掩码的里字重新指派 —— 每个里字各自（带拖动方向
+    // 偏置）重新挑一个掩码内目标，于是它们沿各自路径翻涌着追向被拖去的位置，
+    // 而非刚性平移。仍在路上的里字保留自己的路径，互相之间产生相对运动。
+    const maskKeys = new Set(shifted.map(c => this.grid.getCellKey(c.x, c.y)));
+    for (const id of this._shapeChars) {
+      const t = this._wanderTargets.get(id);
+      const inside = t && maskKeys.has(this.grid.getCellKey(t.tx, t.ty));
+      if (!inside) {
+        const char = this.characters.get(id);
+        if (char) this._assignWanderTarget(char);
+      }
+    }
     return true;
   }
 
@@ -326,14 +339,19 @@ export class MotionEngine {
     const rows = grid.rows;
     const totalCells = cols * rows;
 
-    // Reset PIBT state
+    // Reset PIBT state. _occupiedNow/Nxt are sized to the grid (constant);
+    // _nextPos is sized to N, which can change when里字 are added/removed for
+    // 字数自适应 —— so resize it independently whenever the count shifts.
     if (this._occupiedNow.length !== totalCells) {
       this._occupiedNow = new Array(totalCells).fill(-1);
       this._occupiedNxt = new Array(totalCells).fill(-1);
-      this._nextPos = new Array(N).fill(-1);
     } else {
       this._occupiedNow.fill(-1);
       this._occupiedNxt.fill(-1);
+    }
+    if (this._nextPos.length !== N) {
+      this._nextPos = new Array(N).fill(-1);
+    } else {
       this._nextPos.fill(-1);
     }
 
@@ -415,7 +433,8 @@ export class MotionEngine {
       for (const char of chars) {
         const stuck = this._stuckTicks.get(char.id) || 0;
         if (this._shapeChars.has(char.id) && this._shapeMask) {
-          const refresh = ((this._stepCount + char.id * 7) % 17) === 0;
+          // 各里字以错相的周期独立重挑目标 → 路径各异、产生相对运动（翻涌）。
+          const refresh = ((this._stepCount + char.id * 7) % 11) === 0;
           if (refresh || stuck > 2 || !this._wanderTargets.has(char.id)) {
             this._assignWanderTarget(char);
           }
@@ -733,44 +752,6 @@ export class MotionEngine {
         char.anchorX = best.x;
         char.anchorY = best.y;
       }
-    }
-  }
-
-  _assignShapeDragTargets() {
-    if (!this._shapeMask || this._shapeMask.length === 0) return;
-
-    const used = new Set();
-    for (const id of this._shapeChars) {
-      const char = this.characters.get(id);
-      if (!char) continue;
-
-      const candidates = [];
-      for (const cell of this._shapeMask) {
-        const key = this.grid.getCellKey(cell.x, cell.y);
-        if (used.has(key)) continue;
-        if (cell.x === char.gridX && cell.y === char.gridY) continue;
-        candidates.push(cell);
-      }
-      if (candidates.length === 0) continue;
-
-      const scored = candidates.map(cell => {
-        const dx = cell.x - char.gridX;
-        const dy = cell.y - char.gridY;
-        const dist = Math.abs(dx) + Math.abs(dy) || 1;
-        const align = this.dragBias
-          ? (dx * this.dragBias.dx + dy * this.dragBias.dy) / dist
-          : 0;
-        return {
-          cell,
-          score: align * 2 + dist * 0.35 + this._stableNoise(char.id, cell.x, cell.y) * 1.8,
-        };
-      }).sort((a, b) => b.score - a.score);
-
-      const topN = Math.min(scored.length, Math.max(1, Math.ceil(scored.length * 0.35)));
-      const pick = scored[id % topN].cell;
-      used.add(this.grid.getCellKey(pick.x, pick.y));
-      this._wanderTargets.set(id, { tx: pick.x, ty: pick.y });
-      this._stuckTicks.set(id, 0);
     }
   }
 
