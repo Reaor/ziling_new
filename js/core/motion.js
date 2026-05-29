@@ -287,38 +287,24 @@ export class MotionEngine {
    * @param {boolean} [loop=true] —— 闭合环路
    */
   /**
-   * 多路径流动：paths = Array<{ line:[{x,y}], cells:[{x,y}], loop:bool }>。
-   *   - line  = 笔画中心线（流动方向 / 进度）。
-   *   - cells = 加宽带（里字活动范围；里字沿 line 流动并在带内横向随机 → 不单调）。
-   *   - loop=true（曲线）：沿闭环绕圈；loop=false（开放笔画）：传送带式单向流动，
-   *     头淡入、尾淡出（flowAlpha），到尾部隐形回收到头部（收束 L34 + 用户细化）。
-   * 里字按各笔画"带格数"比例分配，每条笔画保底字数（避免嘴等短笔画太少）。
+   * 多路径流动：paths = Array<{cells:[{x,y}], loop:bool}>。
+   *   - loop=true（曲线/数学曲线）：里字沿闭环首尾相连地绕圈流动。
+   *   - loop=false（颜文字/巨字的每条笔画）：里字在该笔画上往返（slosh）流动，
+   *     实心填满笔画格子，全员速率一致地动。
+   * 里字按各路径长度比例分配，每条路径都留出空位（流动所需缝隙）。
    */
   setFlowPaths(paths, charIds) {
-    const dedupe = (arr) => {
-      const seen = new Set(); const out = [];
-      for (const c of arr || []) {
-        const k = this.grid.getCellKey(c.x, c.y);
-        if (seen.has(k)) continue; seen.add(k); out.push({ x: c.x, y: c.y });
-      }
-      return out;
-    };
     const norm = [];
     for (const p of paths || []) {
-      const line = dedupe(p.line || p.cells);
-      const cells = dedupe(p.cells || p.line);
-      if (line.length === 0 || cells.length === 0) continue;
-      // cross[i] = band cells within Chebyshev≤1 of line[i] (a stroke cross-section).
-      const bandSet = new Set(cells.map(c => this.grid.getCellKey(c.x, c.y)));
-      const cross = line.map(c => {
-        const arr = [];
-        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
-          const x = c.x + dx, y = c.y + dy;
-          if (bandSet.has(this.grid.getCellKey(x, y))) arr.push({ x, y });
-        }
-        return arr.length ? arr : [c];
-      });
-      norm.push({ line, cells, loop: !!p.loop, cross });
+      const seen = new Set();
+      const cells = [];
+      for (const c of p.cells) {
+        const k = this.grid.getCellKey(c.x, c.y);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        cells.push({ x: c.x, y: c.y });
+      }
+      if (cells.length > 0) norm.push({ cells, loop: !!p.loop, dir: 1 });
     }
     if (norm.length === 0) return;
 
@@ -327,7 +313,7 @@ export class MotionEngine {
     this._shapeChars = new Set(charIds);
     this._flowOf.clear();
 
-    // union of all band cells → PIBT containment mask
+    // union of all path cells → PIBT containment mask
     const seenM = new Set();
     const mask = [];
     for (const p of norm) for (const c of p.cells) {
@@ -338,36 +324,33 @@ export class MotionEngine {
     }
     this._shapeMask = mask;
 
-    // allocate chars ∝ band size, each path keeping ≥1 gap, with a小笔画保底.
+    // allocate chars across paths ∝ length, each path keeping ≥1 gap.
     const ids = [...this._shapeChars];
-    const cap = norm.map(p => Math.max(0, p.cells.length - 1));
-    const totalCap = cap.reduce((a, b) => a + b, 0) || 1;
-    const floor = norm.map((p, k) => Math.min(cap[k], Math.min(4, p.line.length)));
-    const alloc = norm.map((p, k) =>
-      Math.min(cap[k], Math.max(floor[k], Math.round(ids.length * cap[k] / totalCap))));
+    const totalLen = norm.reduce((s, p) => s + p.cells.length, 0) || 1;
+    const alloc = norm.map(p =>
+      Math.min(p.cells.length - 1, Math.max(0, Math.round(ids.length * p.cells.length / totalLen))));
     let assigned = alloc.reduce((a, b) => a + b, 0);
-    let g = 0, guard = 0;
-    while (assigned < ids.length && norm.some((p, k) => alloc[k] < cap[k]) && guard++ < 10000) {
-      if (alloc[g] < cap[g]) { alloc[g]++; assigned++; }
+    let g = 0;
+    while (assigned < ids.length && norm.some((p, k) => alloc[k] < p.cells.length - 1)) {
+      if (alloc[g] < norm[g].cells.length - 1) { alloc[g]++; assigned++; }
       g = (g + 1) % norm.length;
     }
-    guard = 0;
-    while (assigned > ids.length && guard++ < 10000) {
-      if (alloc[g] > floor[g]) { alloc[g]--; assigned--; }
-      else if (alloc[g] > 0 && assigned > ids.length) { alloc[g]--; assigned--; }
+    while (assigned > ids.length) {
+      if (alloc[g] > 0) { alloc[g]--; assigned--; }
       g = (g + 1) % norm.length;
     }
 
     let cursor = 0;
     for (let p = 0; p < norm.length; p++) {
       const path = norm[p];
-      const Ln = path.line.length;
-      const n = Math.min(alloc[p], ids.length - cursor);
+      const L = path.cells.length;
+      const n = alloc[p];
       const pIds = ids.slice(cursor, cursor + n);
       cursor += n;
+      // seed by nearest path cell → smoother entry (fewer crossings)
       pIds.sort((a, b) => this._nearestPathIndex(path, a) - this._nearestPathIndex(path, b));
       for (let k = 0; k < n; k++) {
-        const idx = Math.floor((k * Ln) / Math.max(n, 1)) % Ln;
+        const idx = Math.floor((k * L) / Math.max(n, 1)) % L;
         this._flowOf.set(pIds[k], { p, i: idx });
         this._stuckTicks.set(pIds[k], 0);
         this._setFlowTarget(pIds[k]);
@@ -375,70 +358,46 @@ export class MotionEngine {
     }
   }
 
-  /** Single-path convenience (curves / tests): line == cells (1-wide). */
+  /** Single-path convenience (curves / tests). */
   setFlowPath(orderedCells, charIds, loop = true) {
-    this.setFlowPaths([{ line: orderedCells, cells: orderedCells, loop }], charIds);
+    this.setFlowPaths([{ cells: orderedCells, loop }], charIds);
   }
 
   _nearestPathIndex(path, charId) {
     const char = this.characters.get(charId);
     if (!char) return 0;
     let best = 0, bestD = Infinity;
-    for (let i = 0; i < path.line.length; i++) {
-      const c = path.line[i];
+    for (let i = 0; i < path.cells.length; i++) {
+      const c = path.cells[i];
       const d = Math.abs(c.x - char.gridX) + Math.abs(c.y - char.gridY);
       if (d < bestD) { bestD = d; best = i; }
     }
     return best;
   }
 
-  /** Set a flow char's target (a band cell at/near its line index) + flowAlpha. */
   _setFlowTarget(charId) {
     const o = this._flowOf.get(charId);
     if (!o) return;
-    const path = this._flowPaths[o.p];
-    const line = path.line[o.i];
-    const cross = path.cross[o.i] || [line];
-    // 带内横向随机：约 45% 走中心线，其余随机落在带内某侧 → 笔画更厚、不单调。
-    const cell = (cross.length <= 1 || Math.random() < 0.45)
-      ? line
-      : cross[Math.floor(Math.random() * cross.length)];
-    this._wanderTargets.set(charId, { tx: cell.x, ty: cell.y });
-
-    const char = this.characters.get(charId);
-    if (!char) return;
-    if (path.loop) { char.flowAlpha = 1; return; }
-    // 开放笔画：头/尾若干格淡入淡出（隐藏回收的"瞬移"）。
-    const L = path.line.length;
-    const edge = Math.min(3, Math.max(1, Math.floor(L / 4)));
-    let a = 1;
-    if (o.i < edge) a = (o.i + 1) / (edge + 1);
-    else if (o.i >= L - edge) a = (L - o.i) / (edge + 1);
-    char.flowAlpha = Math.max(0, Math.min(1, a));
+    const cell = this._flowPaths[o.p].cells[o.i];
+    if (cell) this._wanderTargets.set(charId, { tx: cell.x, ty: cell.y });
   }
 
   _advanceFlowIndex(charId) {
     const o = this._flowOf.get(charId);
     if (!o) return;
     const path = this._flowPaths[o.p];
-    const L = path.line.length;
+    const L = path.cells.length;
     if (path.loop) {
       o.i = (o.i + 1) % L;
     } else {
-      o.i += 1;
-      if (o.i >= L) { o.i = 0; this._recycleFlowToHead(charId, path); } // 尾→头（隐形回收）
+      let ni = o.i + path.dir;
+      if (ni < 0 || ni >= L) {        // reached an end → reverse this笔画 (往返)
+        path.dir *= -1;
+        ni = Math.max(0, Math.min(L - 1, o.i + path.dir));
+      }
+      o.i = ni;
     }
     this._setFlowTarget(charId);
-  }
-
-  /** Teleport an open-stroke char back to a free head-band cell (hidden by flowAlpha≈0). */
-  _recycleFlowToHead(charId, path) {
-    const char = this.characters.get(charId);
-    if (!char) return;
-    const head = path.cross[0] || [path.line[0]];
-    const cell = head.find(c => !this.grid.isOccupied(c.x, c.y)) || head[0];
-    char.gridX = cell.x; char.gridY = cell.y;
-    char.prevGridX = cell.x; char.prevGridY = cell.y;
   }
 
   // ── Orbit（拖动环绕）—— 显示层驱动，绕开 PIBT ───────────────────
@@ -518,12 +477,7 @@ export class MotionEngine {
     this._orbitOf.clear();
   }
 
-  // Find the nearest free cell to (x,y). If `used` is given, "free" means not in
-  // that Set; otherwise it means not currently occupied on the grid.
   _nearestFreeCell(x, y, used) {
-    const free = (nx, ny) => used
-      ? !used.has(this.grid.getCellKey(nx, ny))
-      : !this.grid.isOccupied(nx, ny);
     const maxR = Math.max(this.grid.cols, this.grid.rows);
     for (let r = 1; r < maxR; r++) {
       for (let dy = -r; dy <= r; dy++) {
@@ -531,7 +485,7 @@ export class MotionEngine {
           if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
           const nx = x + dx, ny = y + dy;
           if (nx < 0 || ny < 0 || nx >= this.grid.cols || ny >= this.grid.rows) continue;
-          if (free(nx, ny)) return { x: nx, y: ny };
+          if (!used.has(this.grid.getCellKey(nx, ny))) return { x: nx, y: ny };
         }
       }
     }
@@ -698,14 +652,7 @@ export class MotionEngine {
 
     this.grid.clearAll();
     for (const char of chars) {
-      if (!this.grid.occupy(char.id, char.gridX, char.gridY)) {
-        // Cell already taken (e.g. a flow recycle teleport collided) → relocate
-        // this里字 to the nearest free cell so the grid never desyncs.
-        const f = this._nearestFreeCell(char.gridX, char.gridY, null);
-        char.gridX = f.x; char.gridY = f.y;
-        char.prevGridX = f.x; char.prevGridY = f.y;
-        this.grid.occupy(char.id, char.gridX, char.gridY);
-      }
+      this.grid.occupy(char.id, char.gridX, char.gridY);
     }
 
     // During drag, keep shape characters alive inside the shifted mask.

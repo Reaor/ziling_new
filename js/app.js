@@ -32,10 +32,9 @@ const FADE_MS = 600;           // 里字自适应增减时的淡入/淡出时长
 const INITIAL_CHARS = 56;      // 首屏播种数（之后随形状自适应增减）
 const MIN_CHARS = 28;
 const MAX_CHARS = 130;
-// 流动呈现：里字沿笔画流动、在加宽带内横向随机。FLOW_FILL_LINE 用于 1 宽闭环
-// （曲线，填密保连续）；FLOW_FILL_BAND 用于加宽笔画带（略稀，靠横向随机显厚实）。
-const FLOW_FILL_LINE = 0.8;
-const FLOW_FILL_BAND = 0.55;
+// 流动呈现：里字沿路径流动，约填满路径总格数的 FLOW_FILL，余下为流动所需空位。
+// 所有动态形状里字都持续运动、速率一致（绝不静止）。
+const FLOW_FILL = 0.82;
 // 微动：点击时随点击反应触发的一次性"轻摆"脉冲（全体一起做、随后衰减），
 // 不常驻（常驻会很乱）。MICRO_AMP=幅度(px)，MICRO_DECAY_MS=衰减时长。
 const MICRO_AMP = 3.0;
@@ -159,16 +158,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // 目标里字数：每条笔画按其"带格数"配字。加宽带(stroke)略稀(填满感来自横向随机)，
-  // 1 宽闭环(曲线)填得更密以保持连续。求和后夹到 [MIN,MAX]。
-  const targetCharCount = paths => {
-    let t = 0;
-    for (const p of paths) {
-      const wide = p.cells.length > p.line.length * 1.3;
-      t += Math.round(p.cells.length * (wide ? FLOW_FILL_BAND : FLOW_FILL_LINE));
-    }
-    return Math.max(MIN_CHARS, Math.min(MAX_CHARS, t));
-  };
+  const pathsCellCount = paths => paths.reduce((s, p) => s + p.cells.length, 0);
 
   // 用当前形状的路径把在册里字约束成"流动呈现"。散开/打断/松手后归位都用它。
   function formCurrent() {
@@ -185,10 +175,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!paths || paths.length === 0) return;
     currentPaths = paths;
     shapeActive = true;
-    // 里字数随形状自适应（收束 L33）：复杂字笔画多→字多，拼得清晰。
-    adaptCharCount(targetCharCount(paths), paths.flatMap(p => p.cells));
+    // 里字数随形状路径总格数自适应：约填满 FLOW_FILL，余下为流动所需空位（收束 L33）。
+    const total = pathsCellCount(paths);
+    const target = Math.max(MIN_CHARS, Math.min(MAX_CHARS, Math.round(total * FLOW_FILL)));
+    adaptCharCount(target, paths.flatMap(p => p.cells));
     formCurrent();
-    console.log(`Shape → ${def.name} (${paths.length} strokes, ${aliveIds().length}里字)`);
+    console.log(`Shape → ${def.name} (${paths.length} paths, ${total} cells, ${aliveIds().length}里字)`);
   }
 
   function releaseShape() {
@@ -215,11 +207,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const xs = all.map(c => c.x), ys = all.map(c => c.y);
     sx = Math.max(-Math.min(...xs), Math.min(gridCols - 1 - Math.max(...xs), sx));
     sy = Math.max(-Math.min(...ys), Math.min(gridRows - 1 - Math.max(...ys), sy));
-    const shift = c => ({ x: c.x + sx, y: c.y + sy });
     currentPaths = currentPaths.map(p => ({
       loop: p.loop,
-      line: p.line.map(shift),
-      cells: p.cells.map(shift),
+      cells: p.cells.map(c => ({ x: c.x + sx, y: c.y + sy })),
     }));
     formCurrent();
   }
@@ -342,11 +332,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const tSec = now / 1000;
     const amp = motion.isOrbiting() ? 0 : microEnv * MICRO_AMP;
     for (const char of pool.getAll()) {
-      const a = char.alpha * char.flowAlpha; // flowAlpha: 传送带头淡入/尾淡出
-      if (a > 0.01) {
+      if (char.alpha > 0.01) {
         const mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
         const my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
-        ctx.globalAlpha = a;
+        ctx.globalAlpha = char.alpha;
         ctx.fillText(char.char,
           char.displayX + CELL_SIZE / 2 + mx,
           char.displayY + CELL_SIZE / 2 + my);

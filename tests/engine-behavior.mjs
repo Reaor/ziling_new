@@ -758,33 +758,29 @@ function testOpenStrokePingPongFlowKeepsMoving() {
   assert.ok(onPath / samples >= 0.95, `ping-pong里字 should stay on the stroke, onPath ${(onPath / samples).toFixed(2)}`);
 }
 
-// Regression: glyph → skeleton stroke paths. A solid bar thins to a centre line
-// (one open path) widened into a band; two disjoint blobs → ≥2 paths.
-function testGlyphToPathsSkeletonisesStrokes() {
+// Regression: mask → stroke paths splits into connected components, each path
+// covering exactly its component's cells (so flow can fill every笔画).
+function testMaskToPathsSplitsComponentsAndCoversCells() {
   const shapes = new ShapeSystem();
-  const cols = 24, rows = 24;
-  // one solid horizontal bar (3 tall × 12 wide) → centre line ≈ 1 row
-  const bar = [];
-  for (let x = 3; x < 15; x++) for (let y = 5; y < 8; y++) bar.push({ x, y });
-  const paths = shapes._glyphToPaths(bar, cols, rows);
-  assert.ok(paths.length >= 1, 'bar yields at least one stroke path');
-  const main = paths.reduce((a, b) => (b.line.length > a.line.length ? b : a));
-  assert.ok(main.line.length >= 6, `centre line spans the bar, got ${main.line.length}`);
-  assert.ok(main.cells.length >= main.line.length, 'band is at least as big as the line');
-  for (const c of main.cells) {
-    assert.ok(c.x >= 0 && c.y >= 0 && c.x < cols && c.y < rows, 'band cells in bounds');
-  }
+  const cols = 24;
+  const cells = [];
+  for (let x = 2; x < 6; x++) for (let y = 2; y < 6; y++) cells.push({ x, y }); // blob A (4x4)
+  for (let x = 12; x < 15; x++) for (let y = 8; y < 11; y++) cells.push({ x, y }); // blob B (3x3)
+  const paths = shapes._maskToPaths(cells, cols);
 
-  // two separated blobs → two components → ≥2 paths
-  const two = [];
-  for (let x = 2; x < 5; x++) for (let y = 2; y < 5; y++) two.push({ x, y });
-  for (let x = 14; x < 17; x++) for (let y = 14; y < 17; y++) two.push({ x, y });
-  assert.ok(shapes._glyphToPaths(two, cols, rows).length >= 2, 'two blobs → ≥2 paths');
+  assert.equal(paths.length, 2, 'two disjoint blobs → two stroke paths');
+  const total = paths.reduce((s, p) => s + p.cells.length, 0);
+  assert.equal(total, cells.length, 'paths cover every mask cell exactly once');
+  for (const p of paths) {
+    const uniq = new Set(p.cells.map(c => `${c.x},${c.y}`));
+    assert.equal(uniq.size, p.cells.length, 'no duplicate cells within a path');
+    assert.equal(p.loop, false, 'stroke paths are open (ping-pong)');
+  }
 }
 
 await testDoubleTapUsesGridCoordinates();
 await testSingleTapFiresImmediately();
-testGlyphToPathsSkeletonisesStrokes();
+testMaskToPathsSplitsComponentsAndCoversCells();
 testFlowStreamsAlongPathStayingOnTrack();
 testOpenStrokePingPongFlowKeepsMoving();
 testOrbitClustersAroundFingerAndFollows();

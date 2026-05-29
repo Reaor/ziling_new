@@ -90,7 +90,7 @@ export class ShapeSystem {
    */
   sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 80) {
     const text = EMOJI_TEMPLATES[emojiKey] ? emojiKey : '^_^';
-    const solid = this._rasterToCells(gridCols, gridRows, 0.10, (ctx, W, H) => {
+    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.10, (ctx, W, H) => {
       // 颜文字 are wide and short — fit mostly by width, keep a short band.
       const fs = this._fitFont(ctx, text, W * 0.94, H * 0.6);
       ctx.font = `${fs}px ${FONT_STACK}`;
@@ -99,11 +99,12 @@ export class ShapeSystem {
       ctx.fillStyle = '#ffffff';
       ctx.fillText(text, W / 2, H / 2);
     });
-    const paths = this._glyphToPaths(solid, gridCols, gridRows);
+
+    this.currentMask = mask;
     this.currentShape = emojiKey;
     this.constraintType = 'flow';
-    // 每条笔画 = 骨架中心线(line) + 加宽带(cells)；里字沿笔画流动并在带内横向随机。
-    return { paths, constraint: 'flow' };
+    // 拆成每条笔画的有序路径（往返流动），让全体里字实心填满字形并持续运动。
+    return { mask, paths: this._maskToPaths(mask, gridCols), constraint: 'flow' };
   }
 
   /* ----------------------------------------------------------
@@ -121,7 +122,7 @@ export class ShapeSystem {
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
   sampleMegachar(char, gridCols, gridRows, maxChars = 100, direction = 'horizontal') {
-    const solid = this._rasterToCells(gridCols, gridRows, 0.14, (ctx, W, H) => {
+    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.14, (ctx, W, H) => {
       const fs = this._fitFont(ctx, char, W * 0.9, H * 0.9);
       ctx.font = `${fs}px ${FONT_STACK}`;
       ctx.textAlign = 'center';
@@ -129,10 +130,11 @@ export class ShapeSystem {
       ctx.fillStyle = '#ffffff';
       ctx.fillText(char, W / 2, H / 2);
     });
-    const paths = this._glyphToPaths(solid, gridCols, gridRows);
+
+    this.currentMask = mask;
     this.currentShape = char;
     this.constraintType = 'flow';
-    return { paths, constraint: 'flow' };
+    return { mask, paths: this._maskToPaths(mask, gridCols), constraint: 'flow' };
   }
 
   /* ----------------------------------------------------------
@@ -247,140 +249,51 @@ export class ShapeSystem {
     this.currentMask = mask;
     this.currentShape = type;
     this.constraintType = 'flow';
-    // 曲线/数学曲线 → 单条闭环路径（line=cells，1 宽），里字首尾相连绕圈流动。
-    return { paths: [{ line: mask, cells: mask, loop: true }], constraint: 'flow', ordered: true };
+    // 曲线/数学曲线 → 单条闭环路径，里字首尾相连绕圈流动。
+    return { mask, paths: [{ cells: mask, loop: true }], constraint: 'flow', ordered: true };
   }
 
   /* ----------------------------------------------------------
-   *  GLYPH → STROKE PATHS（骨架细化 + 追踪 + 加宽带）
+   *  MASK → STROKE PATHS（连通分量 + 最近邻链）
    * ---------------------------------------------------------- */
 
   /**
-   * 把实心字形拆成"笔画路径"：Zhang-Suen 细化出 1 像素骨架 → 追踪成中心线折线
-   * → 每条线加宽成一条带。里字沿中心线流动、在带内横向随机（不单调）。纯函数。
-   * @param {Array<{x,y}>} solid 实心字形格子
-   * @param {number} cols @param {number} rows
-   * @returns {Array<{line:Array<{x,y}>, cells:Array<{x,y}>, loop:boolean}>}
+   * 把一组掩码格子拆成"笔画路径"：先按 4-连通分出各笔画，再用最近邻链把每条
+   * 笔画的格子排成一条有序路径（往返流动用）。纯函数，可测。
+   * @param {Array<{x,y}>} cells
+   * @param {number} cols
+   * @returns {Array<{cells:Array<{x,y}>, loop:boolean}>}
    */
-  _glyphToPaths(solid, cols, rows) {
-    if (!solid || solid.length === 0) return [];
-    const skel = this._thinZS(solid, cols, rows);
-    let lines = this._traceSkeleton(skel, cols, rows);
-    // 极少数情形骨架追踪为空 → 回退到整体最近邻链。
-    if (lines.length === 0) lines = [{ line: this._nnChain(solid), loop: false }];
-    const solidSet = new Set(solid.map(c => c.y * cols + c.x));
-    return lines
-      .filter(l => l.line.length >= 1)
-      .map(l => ({ line: l.line, loop: l.loop, cells: this._dilateBand(l.line, cols, rows, solidSet) }));
-  }
+  _maskToPaths(cells, cols) {
+    if (!cells || cells.length === 0) return [];
+    const key = (x, y) => y * cols + x;
+    const remaining = new Map();
+    for (const c of cells) remaining.set(key(c.x, c.y), c);
 
-  /** Zhang-Suen thinning → Set of skeleton cell keys (y*cols+x). @private */
-  _thinZS(solid, cols, rows) {
-    const on = new Set(solid.map(c => c.y * cols + c.x));
-    const at = (x, y) => (x >= 0 && y >= 0 && x < cols && y < rows && on.has(y * cols + x)) ? 1 : 0;
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (let step = 0; step < 2; step++) {
-        const rem = [];
-        for (const k of on) {
-          const x = k % cols, y = (k - x) / cols;
-          const p2 = at(x, y - 1), p3 = at(x + 1, y - 1), p4 = at(x + 1, y), p5 = at(x + 1, y + 1),
-                p6 = at(x, y + 1), p7 = at(x - 1, y + 1), p8 = at(x - 1, y), p9 = at(x - 1, y - 1);
-          const B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
-          if (B < 2 || B > 6) continue;
-          const seq = [p2, p3, p4, p5, p6, p7, p8, p9, p2];
-          let A = 0;
-          for (let i = 0; i < 8; i++) if (seq[i] === 0 && seq[i + 1] === 1) A++;
-          if (A !== 1) continue;
-          if (step === 0) { if (p2 && p4 && p6) continue; if (p4 && p6 && p8) continue; }
-          else { if (p2 && p4 && p8) continue; if (p2 && p6 && p8) continue; }
-          rem.push(k);
-        }
-        if (rem.length) { changed = true; for (const k of rem) on.delete(k); }
-      }
-    }
-    return on;
-  }
-
-  /**
-   * Trace a 1-px skeleton into polylines: walk edges between nodes (degree≠2);
-   * leftover degree-2 rings become closed loops. @private
-   * @returns {Array<{line:Array<{x,y}>, loop:boolean}>}
-   */
-  _traceSkeleton(on, cols, rows) {
-    const DIRS8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
-    const nbrs = (k) => {
-      const x = k % cols, y = (k - x) / cols;
-      const r = [];
-      for (const [dx, dy] of DIRS8) {
-        const nx = x + dx, ny = y + dy;
-        if (nx >= 0 && ny >= 0 && nx < cols && ny < rows && on.has(ny * cols + nx)) r.push(ny * cols + nx);
-      }
-      return r;
-    };
-    const deg = (k) => nbrs(k).length;
-    const toXY = (k) => ({ x: k % cols, y: (k - (k % cols)) / cols });
-    const eKey = (a, b) => a < b ? a + '_' + b : b + '_' + a;
-    const usedEdge = new Set();
-    const paths = [];
-
-    const walk = (start, first) => {
-      const line = [toXY(start)];
-      let prev = start, cur = first;
-      usedEdge.add(eKey(start, first));
-      while (true) {
-        line.push(toXY(cur));
-        if (deg(cur) !== 2) break;
-        const next = nbrs(cur).find(n => n !== prev && !usedEdge.has(eKey(cur, n)));
-        if (next === undefined) break;
-        usedEdge.add(eKey(cur, next));
-        prev = cur; cur = next;
-      }
-      return line;
-    };
-
-    // edges from nodes (endpoints / junctions)
-    for (const k of on) {
-      if (deg(k) === 2) continue;
-      for (const n of nbrs(k)) {
-        if (usedEdge.has(eKey(k, n))) continue;
-        paths.push({ line: walk(k, n), loop: false });
-      }
-    }
-    // leftover pure rings (all degree 2)
-    for (const k of on) {
-      if (deg(k) !== 2) continue;
-      const n = nbrs(k).find(nn => !usedEdge.has(eKey(k, nn)));
-      if (n === undefined) continue;
-      paths.push({ line: walk(k, n), loop: true });
-    }
-    // isolated cells (degree 0 — e.g. a small blob thinned to one dot)
-    for (const k of on) {
-      if (deg(k) === 0) paths.push({ line: [toXY(k)], loop: false });
-    }
-    return paths;
-  }
-
-  /**
-   * Widen a centre line into a band by dilating 1 cell (8-conn) — slightly
-   * spilling past the glyph edge ("边缘放宽")，里字在带内做横向随机更不单调。
-   * @private
-   */
-  _dilateBand(line, cols, rows, _solidSet) {
+    // 4-connected components via flood fill.
+    const components = [];
     const seen = new Set();
-    const band = [];
-    const add = (x, y) => {
-      if (x < 0 || y < 0 || x >= cols || y >= rows) return;
-      const k = y * cols + x;
-      if (seen.has(k)) return;
-      seen.add(k);
-      band.push({ x, y });
-    };
-    for (const c of line) {
-      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) add(c.x + dx, c.y + dy);
+    for (const c of cells) {
+      const k0 = key(c.x, c.y);
+      if (seen.has(k0)) continue;
+      const comp = [];
+      const stack = [c];
+      seen.add(k0);
+      while (stack.length) {
+        const cur = stack.pop();
+        comp.push(cur);
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const nk = key(cur.x + dx, cur.y + dy);
+          if (remaining.has(nk) && !seen.has(nk)) {
+            seen.add(nk);
+            stack.push(remaining.get(nk));
+          }
+        }
+      }
+      components.push(comp);
     }
-    return band;
+
+    return components.map(comp => ({ cells: this._nnChain(comp), loop: false }));
   }
 
   /**
@@ -449,16 +362,6 @@ export class ShapeSystem {
    * @returns {Array<{x:number,y:number}>}
    */
   _rasterToMask(cols, rows, maxChars, threshold, drawFn) {
-    return this._sparsify(this._rasterToCells(cols, rows, threshold, drawFn), maxChars);
-  }
-
-  /**
-   * Rasterise `drawFn` and return ALL lit grid cells (solid, no sparsify) —
-   * the basis for skeletonisation.
-   * @private
-   * @returns {Array<{x:number,y:number}>}
-   */
-  _rasterToCells(cols, rows, threshold, drawFn) {
     const W = cols * SS;
     const H = rows * SS;
     const off = new OffscreenCanvas(W, H);
@@ -485,7 +388,7 @@ export class ShapeSystem {
         if (on >= need) cells.push({ x: gx, y: gy });
       }
     }
-    return cells;
+    return this._sparsify(cells, maxChars);
   }
 
   /**
