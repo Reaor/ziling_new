@@ -189,6 +189,68 @@ export class ShapeSystem {
     return { mask, constraint: 'loose' };
   }
 
+  /**
+   * Sample a parametric curve into an **ordered** chain of grid cells (walking
+   * the curve by parameter t), evenly thinned to ~`count`. Unlike
+   * {@link sampleCurve} (which rasterises into an unordered mask), the order
+   * lets the motion engine stream里字 single-file along the outline (flow),
+   * so thin shapes like心形 keep moving without breaking辨识度.
+   *
+   * Pure math (no canvas) → usable in tests too.
+   * @returns {{ mask: Array<{x:number,y:number}>, constraint:'flow', ordered:true }}
+   */
+  sampleCurveOrdered(type, gridCols, gridRows, count = 60) {
+    const cx = gridCols / 2, cy = gridRows / 2;
+    const scale = Math.min(gridCols, gridRows) * 0.40;
+    const pts = [];
+    // Push a cell, inserting an orthogonal bridge when the step is diagonal so
+    // the path stays 4-connected (rook moves). 里字只走上下左右，4连通才能让
+    // 流动 target 永远是相邻格 → 单列顺畅、不脱离轮廓。
+    const pushCell = (fx, fy) => {
+      const gx = Math.round(fx), gy = Math.round(fy);
+      if (gx < 0 || gy < 0 || gx >= gridCols || gy >= gridRows) return;
+      const last = pts[pts.length - 1];
+      if (last && last.x === gx && last.y === gy) return;
+      if (last) {
+        const ddx = gx - last.x, ddy = gy - last.y;
+        if (Math.abs(ddx) === 1 && Math.abs(ddy) === 1) {
+          pts.push({ x: last.x + ddx, y: last.y }); // orthogonal bridge
+        }
+      }
+      pts.push({ x: gx, y: gy });
+    };
+    for (let t = 0; t <= Math.PI * 2 + 1e-6; t += 0.005) {
+      let x, y;
+      if (type === 'heart') {
+        x = cx + 16 * Math.pow(Math.sin(t), 3) * (scale / 18);
+        y = cy - (13 * Math.cos(t) - 5 * Math.cos(2 * t)
+                  - 2 * Math.cos(3 * t) - Math.cos(4 * t)) * (scale / 18);
+      } else if (type === 'rose') {
+        const r = Math.cos(2 * t) * scale;
+        x = cx + r * Math.cos(t);
+        y = cy + r * Math.sin(t);
+      } else {
+        x = cx + scale * Math.cos(t);
+        y = cy + scale * Math.sin(t);
+      }
+      pushCell(x, y);
+    }
+    // Drop ALL duplicates, preserving first-seen order. For a non-self-touching
+    // loop this keeps consecutive cells 4-adjacent and uniquely ordered.
+    const used = new Set();
+    const mask = [];
+    for (const p of pts) {
+      const k = p.y * gridCols + p.x;
+      if (used.has(k)) continue;
+      used.add(k);
+      mask.push(p);
+    }
+    this.currentMask = mask;
+    this.currentShape = type;
+    this.constraintType = 'flow';
+    return { mask, constraint: 'flow', ordered: true };
+  }
+
   /* ----------------------------------------------------------
    *  MASK QUERIES
    * ---------------------------------------------------------- */
@@ -259,14 +321,52 @@ export class ShapeSystem {
   }
 
   /**
-   * Evenly thin `cells` down to at most `maxChars`, preserving spatial spread.
+   * Thin `cells` down to at most `maxChars` with **spatially uniform** spread
+   * using farthest-point sampling (FPS).
+   *
+   * 旧实现按一维 row-major 序等距抽取，二维上疏密不均 —— 颜文字"眼睛"像素多
+   * 的区域会分到过多采样点、"嘴"等细笔画几乎被抽空，导致难以辨形。FPS 每次
+   * 选离已选集合最远的点，能让采样点均匀覆盖整个字形（细笔画也保有代表点），
+   * 显著改善辨形。结果是确定性的（以最接近质心的点为种子）。
    * @private
    */
   _sparsify(cells, maxChars) {
     if (cells.length <= maxChars) return cells;
-    const step = cells.length / maxChars;
-    const out = [];
-    for (let i = 0; i < maxChars; i++) out.push(cells[Math.floor(i * step)]);
+    const n = cells.length;
+
+    // Seed: the cell closest to the centroid (deterministic).
+    let cx = 0, cy = 0;
+    for (const c of cells) { cx += c.x; cy += c.y; }
+    cx /= n; cy /= n;
+    let seed = 0, seedD = Infinity;
+    for (let i = 0; i < n; i++) {
+      const dx = cells[i].x - cx, dy = cells[i].y - cy;
+      const d = dx * dx + dy * dy;
+      if (d < seedD) { seedD = d; seed = i; }
+    }
+
+    const chosen = new Uint8Array(n);
+    chosen[seed] = 1;
+    const out = [cells[seed]];
+    // minD[i] = squared distance from cell i to the nearest chosen cell.
+    const minD = new Float64Array(n).fill(Infinity);
+    let last = seed;
+
+    for (let k = 1; k < maxChars; k++) {
+      const lx = cells[last].x, ly = cells[last].y;
+      let far = -1, farD = -1;
+      for (let i = 0; i < n; i++) {
+        if (chosen[i]) continue;
+        const dx = cells[i].x - lx, dy = cells[i].y - ly;
+        const d = dx * dx + dy * dy;
+        if (d < minD[i]) minD[i] = d;
+        if (minD[i] > farD) { farD = minD[i]; far = i; }
+      }
+      if (far === -1) break;
+      chosen[far] = 1;
+      out.push(cells[far]);
+      last = far;
+    }
     return out;
   }
 }

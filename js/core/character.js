@@ -76,6 +76,9 @@ export class Character {
     this.color = '#e0e0e0';
     /** @type {number} Opacity 0..1 */
     this.alpha = 1.0;
+    /** @type {number} Target opacity the loop eases `alpha` toward (1=in, 0=out).
+     *  里字自适应增减时用于柔和淡入/淡出；淡出至 0 后由编排层回收。 */
+    this.fadeTarget = 1.0;
     /** @type {string} Current state from {@link CHAR_STATE} */
     this.state = CHAR_STATE.IDLE;
     /** @type {string|null} Shape region label (e.g. 'outer', 'inner') */
@@ -114,6 +117,7 @@ export class Character {
     this.pathTimeSlot = 0;
     this.color = '#e0e0e0';
     this.alpha = 1.0;
+    this.fadeTarget = 1.0;
     this.state = CHAR_STATE.IDLE;
     this.region = null;
     this.anchorX = gridX;
