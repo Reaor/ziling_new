@@ -205,6 +205,29 @@ export class MotionEngine {
   }
 
   /**
+   * 满填循环流动（颜文字/巨字的动态呈现）：里字填满字形掩码并被牢牢约束在轮廓内
+   * （绝不漏出 → 字形始终保持），但**无远目标**，靠方向惯性在笔画内成排循环游走
+   * —— 在 ≥2 格宽的笔画里自然形成"转大圈"的赛道式流动（像心形曲线，但是填满的带）。
+   * 既动态、又辨形稳，且无需脆弱的路径生成、对任意字都稳健。
+   * @param {Array<{x,y}>} mask @param {number[]} charIds
+   */
+  setFlowFill(mask, charIds) {
+    this._flowOf.clear();
+    this._flowPaths = null;
+    this._shapeMask = mask;
+    this._rebuildMaskSet();
+    this._shapeConstraint = 'flowfill';
+    this._shapeChars = new Set(charIds);
+    for (const id of charIds) {
+      this._wanderTargets.delete(id);            // 无目标 → PIBT 持向流动
+      const d = DIRS[(Math.random() * 4) | 0];
+      this._currentDirs.set(id, { dx: d.dx, dy: d.dy });
+      this._directionStreaks.set(id, (Math.random() * 8) | 0);
+      this._stuckTicks.set(id, 0);
+    }
+  }
+
+  /**
    * Start a drag operation without throwing away the active shape.
    * The drag preview shifts the mask target while agents still walk cell-by-cell.
    */
@@ -636,8 +659,10 @@ export class MotionEngine {
     }
     if (this._nextPos.length !== N) {
       this._nextPos = new Array(N).fill(-1);
+      this._pibtMark = new Uint8Array(N);
     } else {
       this._nextPos.fill(-1);
+      this._pibtMark.fill(0); // 0=未处理 1=处理中 2=已定 —— 保证每字每 tick 只解析一次（防环死循环）
     }
 
     const idx = (x, y) => y * cols + x;
@@ -754,7 +779,22 @@ export class MotionEngine {
     }
   }
 
+  /**
+   * PIBT 解析的终止性包裹：每个里字每 tick 只真正解析一次。
+   *  - 已定(2)：直接返回是否拿到了下一步；
+   *  - 处理中(1)：说明遇到了推挤环（A 推 B、B 又依赖 A）→ 视为"此刻无法让位"返回 false，
+   *    打破环、保证 O(N) 终止（满填 + 全员无目标的密集场景下，旧代码会在此死循环）。
+   */
   _funcPIBT(chars, i, cols, rows, idx, idToIndex) {
+    if (this._pibtMark[i] === 2) return this._nextPos[i] !== -1;
+    if (this._pibtMark[i] === 1) return false;
+    this._pibtMark[i] = 1;
+    const r = this._pibtBody(chars, i, cols, rows, idx, idToIndex);
+    this._pibtMark[i] = 2;
+    return r;
+  }
+
+  _pibtBody(chars, i, cols, rows, idx, idToIndex) {
     const char = chars[i];
     const grid = this.grid;
     const target = this._wanderTargets.get(char.id);
@@ -893,6 +933,8 @@ export class MotionEngine {
   _assignWanderTarget(char) {
     // Shape-constrained: pick from mask, biased toward drag if active
     if (this._shapeChars.has(char.id) && this._shapeMaskSet.size > 0) {
+      // flowfill：不设目标 → 里字靠方向惯性在轮廓内成排循环流动（满填循环）。
+      if (this._shapeConstraint === 'flowfill') return;
       const dragging = this.dragBias && this.dragBias.strength > 0.2;
 
       // strict（颜文字/巨字）非拖动：只在**锚点的小邻域**（曼哈顿≤2）里挑空格做就近
