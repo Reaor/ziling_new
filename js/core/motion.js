@@ -767,11 +767,10 @@ export class MotionEngine {
           if (this._shapeConstraint === 'flow' && this._flowOf.has(char.id)) {
             // 流动中被堵 → 跳到下一路径格绕过拥堵，保持推进不卡死。
             this._advanceFlowIndex(char.id);
-          } else if (this._shapeConstraint === 'flowfill' && this._inMask(char.gridX, char.gridY)) {
-            // 满填循环里被同伴堵住（密处/旋转环）→ 随机换一个方向重新尝试，避免静止。
-            const d = DIRS[(Math.random() * 4) | 0];
-            this._currentDirs.set(char.id, { dx: d.dx, dy: d.dy });
-            this._directionStreaks.set(char.id, 0);
+          } else if (this._shapeConstraint === 'flowfill') {
+            // 满填循环里卡住（无论在字形内还是外）→ 朝**最近的空掩码格**走：在外的走进
+            // 字形（入场、收束），在内的去填最近的空隙（消除静止、分布更均匀更密）。
+            this._assignFlowFillTarget(char);
           } else {
             // Force a new target — PIBT will naturally find a way out
             this._assignWanderTarget(char);
@@ -960,6 +959,22 @@ export class MotionEngine {
   }
 
   // ── Wander ────────────────────────────────────────────
+
+  /**
+   * flowfill 解卡/入场/填缝：给卡住的里字指派**最近的空掩码格**为目标。在字形外的里字
+   * 借此走进字形（收束），在字形内被堵的里字借此移向最近空隙（消除静止、分布更均匀）。
+   * 到达后目标自动清除 → 重新并入惯性循环流动。@private
+   */
+  _assignFlowFillTarget(char) {
+    let best = null, bestD = Infinity;
+    for (const cell of this._shapeMask) {
+      if (cell.x === char.gridX && cell.y === char.gridY) continue;
+      if (this.grid.isOccupied(cell.x, cell.y)) continue;
+      const d = Math.abs(cell.x - char.gridX) + Math.abs(cell.y - char.gridY);
+      if (d < bestD) { bestD = d; best = cell; }
+    }
+    if (best) this._wanderTargets.set(char.id, { tx: best.x, ty: best.y });
+  }
 
   _assignWanderTarget(char) {
     // Shape-constrained: pick from mask, biased toward drag if active
