@@ -800,6 +800,36 @@ function testGlyphToPathsThinsToOneWideStrokes() {
   }
 }
 
+// Regression (CRITICAL): 满填循环流动 flowfill —— 颜文字/巨字的动态呈现。里字填满字形
+// 约 88%、被约束在掩码内（绝不漏出 → 辨形稳），靠方向惯性在笔画内循环流动（人人都动）。
+// 必须：① 一定终止（不再因密集无目标推挤环而死循环）② 无重叠 ③ 不漏出掩码 ④ 持续流动。
+function testFlowFillFlowsWithinMaskCollisionFree() {
+  const grid = new Grid(24, 30);
+  const pool = new CharacterPool(300);
+  const motion = new MotionEngine(grid, 12, 0);
+  const mask = [];
+  for (let y = 8; y < 18; y++) for (let x = 5; x < 19; x++) mask.push({ x, y }); // 14×10=140
+  const N = Math.round(mask.length * 0.88); // ~123 → 留缝隙流动
+  const chars = [];
+  for (let i = 0; i < N; i++) { const c = pool.acquire('字', mask[i].x, mask[i].y); chars.push(c); motion.registerCharacter(c); }
+  motion.setFlowFill(mask, chars.map(c => c.id));
+  const maskSet = new Set(mask.map(c => `${c.x},${c.y}`));
+  const moves = new Map(chars.map(c => [c.id, 0]));
+  for (let t = 0; t < 200; t++) { // 若不终止，这里会挂起 → 测试超时即暴露退化
+    const before = new Map(chars.map(c => [c.id, `${c.gridX},${c.gridY}`]));
+    motion.update(200);
+    const seen = new Set();
+    for (const c of chars) {
+      const k = `${c.gridX},${c.gridY}`;
+      assert.equal(seen.has(k), false, `flowfill 重叠 ${k} @${t}`); seen.add(k);
+      assert.equal(maskSet.has(k), true, `flowfill 漏出掩码 ${k} @${t}`);
+      if (before.get(c.id) !== k) moves.set(c.id, moves.get(c.id) + 1);
+    }
+  }
+  const flowing = [...moves.values()].filter(m => m >= 20).length;
+  assert.ok(flowing >= Math.floor(N * 0.8), `绝大多数里字应持续流动，仅 ${flowing}/${N} 动够 20 次`);
+}
+
 // Regression (CRITICAL): 字形 → 骨架笔画路径必须 4 连通（上下左右相邻）。中心线本身
 // 含对角步（撇/捺/尖角），但里字只走 4 方向且被限制在掩码内 —— 对角步若不补正交桥接，
 // 里字到不了下一格 → 流动卡死、卡住的里字 flowFade→0 隐形 → 表现为"笔画缺失/部分字
@@ -867,6 +897,7 @@ await testDoubleTapUsesGridCoordinates();
 await testSingleTapFiresImmediately();
 testGlyphToPathsThinsToOneWideStrokes();
 testGlyphPathsAre4ConnectedForFlow();
+testFlowFillFlowsWithinMaskCollisionFree();
 testOpenStrokeConveyorRecyclesAndKeepsEveryoneMoving();
 testMaskToPathsSplitsComponentsAndCoversCells();
 testFlowStreamsAlongPathStayingOnTrack();

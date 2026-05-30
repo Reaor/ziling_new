@@ -24,8 +24,8 @@ import { MotionEngine } from './core/motion.js';
 import { ShapeSystem, EMOJI_TEMPLATES } from './core/shape.js';
 import { GestureRecognizer } from './input/gestures.js';
 
-const CELL_SIZE = 15;          // 网格分辨率：笔画变细后适当调大格子 → 画面不空、里字更大更美观
-const FONT_SIZE = 13;          // 里字字号（格子变大 → 字可更大，嵌入 app 更清晰；留间距防贴字）
+const CELL_SIZE = 12;          // 网格分辨率：调高(格子变小)→ 笔画有 ≥2 排里字、可在笔画内循环流动
+const FONT_SIZE = 11;          // 里字字号（与较小格子平衡；嵌入 app 仍可读）
 const TICK_MS = 200;           // 常速 tick —— 匀速铁律（拖动期由引擎自行提速跟手）
 const SCATTER_RESTORE_MS = 2500;
 // 里字自适应 = 螺旋淡入/淡出（沿几条螺旋臂一个接一个，向内淡入/向外淡出）。
@@ -35,7 +35,7 @@ const SPIRAL_STAGGER_MS = 70;  // 同臂相邻里字的出发间隔（形成"一
 const SPIRAL_TURNS = 0.7;      // 螺旋缠绕圈数
 const INITIAL_CHARS = 56;      // 首屏播种数（之后随形状自适应增减）
 const MIN_CHARS = 28;
-const MAX_CHARS = 220;   // 笔画变细 + 格子变大后，填满字身所需里字下降（也更流畅）
+const MAX_CHARS = 340;   // 高分辨率 + 粗笔画填满字身需要较多里字（复杂字如"爱"≈300+）
 // 流动呈现：里字沿路径流动，按形态分别控制填充率。
 //  - 闭环曲线(心形/花)：近乎全覆盖，线条才连续不断（用户反馈"曲线没被全覆盖"）。
 //  - 开放笔画(颜文字/巨字)：留更多空位 → 传送带推得动、更灵动（不要静止）。
@@ -43,13 +43,10 @@ const FLOW_FILL_LOOP = 0.95;
 // 骨架细笔画（颜文字/巨字）是 1 格宽中心线：开放笔画走"单向传送带+尾端淡出/首端淡入"，
 // 留约 1/4 空位让传送带顺畅流动、人人都动（细处也不静止）。闭环（曲线/眼睛 o）用 LOOP。
 const FLOW_FILL_STROKE = 0.78;
-// strict（颜文字/巨字）= 实心定形：里字**填满每个掩码格(100%)并钉在格上保持清晰**
-// （易辨形、对任意字都稳）。绝不做自由华容道滑动 —— 那会把清晰字形搅成一团散沙
-// （实测：±2 自由滑动后"春"完全糊掉）。生命感改由显示层的"协调呼吸波"提供。
-const STRICT_FILL = 1.0;
-// 呼吸波：strict 形状里字在显示层按"位置相位 + 时间"做协调的轻荡（整字像水波荡漾，
-// 不是各自乱抖）→ 既清晰又灵动。AMP=幅度(px)，越大越活泼但别糊字。
-const BREATHE_AMP = 2.2;
+// strict（颜文字/巨字）= 满填循环流动 flowfill：里字填满字身的约 88%（留约 12% 缝隙），
+// 被牢牢约束在轮廓内（绝不漏出 → 字形始终保持），靠方向惯性在 ≥2 格宽的笔画内"转大圈"
+// 循环流动 → 既动态呈现（人人都在动）又辨形稳。实测 leaked=0、字形跨帧清晰可辨。
+const STRICT_FILL = 0.88;
 // 微动：MICRO_AMP=点击反应脉冲幅度(px，点击时全体轻摆一下后衰减)；DECAY=衰减时长。
 const MICRO_AMP = 5.5;
 const MICRO_DECAY_MS = 700;
@@ -64,10 +61,31 @@ document.addEventListener('DOMContentLoaded', () => {
   const gridCols = Math.floor(cssWidth / CELL_SIZE);
   const gridRows = Math.floor(cssHeight / CELL_SIZE);
   const grid = new Grid(gridCols, gridRows);
-  const pool = new CharacterPool(380);
+  const pool = new CharacterPool(460);
   const motion = new MotionEngine(grid, CELL_SIZE, 0);
   motion.tickDuration = TICK_MS;
   const shapes = new ShapeSystem();
+
+  // ── 字形位图缓存（性能：把每个里字预渲染成小位图，渲染时 drawImage 而非 fillText）──
+  // 数百里字时 fillText 是每帧主要开销（卡顿源）；drawImage 走 GPU、快 5~10×。
+  const DPR = window.devicePixelRatio || 1;
+  const glyphCache = new Map();
+  function getGlyph(ch) {
+    let g = glyphCache.get(ch);
+    if (g) return g;
+    const cv = document.createElement('canvas');
+    cv.width = Math.ceil(CELL_SIZE * DPR);
+    cv.height = Math.ceil(CELL_SIZE * DPR);
+    const c = cv.getContext('2d');
+    c.scale(DPR, DPR);
+    c.font = `${FONT_SIZE}px "PingFang SC", "Microsoft YaHei", sans-serif`;
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.fillStyle = '#e0e0e0';
+    c.fillText(ch, CELL_SIZE / 2, CELL_SIZE / 2);
+    glyphCache.set(ch, cv);
+    return cv;
+  }
 
   // ── Seed characters in a loose central block ──────────────
   let glyphSeq = 0;
@@ -85,10 +103,10 @@ document.addEventListener('DOMContentLoaded', () => {
   //   - 曲线/数学曲线：单条闭环路径 → flow（里字首尾相连绕圈流动）。
   // `cells` 是该形状里字数上限的提示（越大越密、越清晰）。里字数随掩码格数自适应增减。
   const SHAPES = [
-    { name: '^_^',  cells: 120, make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
-    { name: '>_<',  cells: 120, make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
-    { name: '心',   cells: 200, make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
-    { name: '春',   cells: 200, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
+    { name: '^_^',  cells: 150, make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
+    { name: '>_<',  cells: 150, make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
+    { name: '心',   cells: 340, make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
+    { name: '春',   cells: 340, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
     { name: '爱心', cells: 80,  make: n => shapes.sampleCurveOrdered('heart', gridCols, gridRows, n) },
     { name: '四叶花', cells: 96, make: n => shapes.sampleCurveOrdered('rose', gridCols, gridRows, n) },
   ];
@@ -215,12 +233,12 @@ document.addEventListener('DOMContentLoaded', () => {
     reformPending = true;
   }
 
-  // 把在册里字约束成当前形状：strict（颜文字/巨字）= 密集定形紧约束；flow（曲线）=
-  // 沿闭环流动。散开/打断/松手归位、螺旋增减后并入都用它。
+  // 把在册里字约束成当前形状：strict（颜文字/巨字）= 满填循环流动（笔画内转大圈）；
+  // flow（曲线）= 沿闭环流动。散开/打断/松手归位、螺旋增减后并入都用它。
   function formCurrent() {
     motion.releaseShape();
     if (currentConstraint === 'strict') {
-      motion.setShapeMask(currentCells, aliveIds(), 'strict');
+      motion.setFlowFill(currentCells, aliveIds());
     } else if (currentPaths) {
       motion.setFlowPaths(currentPaths, aliveIds());
     }
@@ -242,12 +260,12 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       target = Math.min(Math.max(MIN_CHARS, target), capacity);
     } else if (sampled.mask && sampled.mask.length > 0) {
-      // 颜文字/巨字 → strict 实心定形：里字数 = 掩码格数（100% 填满 → 清晰），不强行
-      // 抬到 MIN_CHARS（否则小字形会多出无处安放的里字到处乱游）。
+      // 颜文字/巨字 → 满填循环流动：里字数 ≈ 掩码格数 × 0.88（留约 12% 缝隙供笔画内
+      // 循环流动）。不强行抬到 MIN_CHARS（否则小字形会多出无处安放的里字乱游）。
       currentConstraint = 'strict';
       currentPaths = null;
       currentCells = sampled.mask;
-      target = sampled.mask.length;
+      target = Math.round(sampled.mask.length * STRICT_FILL);
     } else {
       return;
     }
@@ -487,33 +505,19 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     const ctx = renderer.getContext();
-    ctx.font = `${FONT_SIZE}px "PingFang SC", "Microsoft YaHei", sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#e0e0e0';
-    // 微动：仅保留**点击反应**的一次性"轻摆"脉冲（microEnv 由 1 衰减），平时为 0。
-    // 形状的生命感来自里字本身收紧的横纵位移，不再叠加常驻颤动（那样各自乱抖、不协调）。
+    // 动态由满填循环流动提供（里字逐格流动 + tick 间插值），无需常驻颤动。
+    // 渲染用**预渲染字形位图 + drawImage**（而非每帧数百次 fillText）→ 大幅降帧耗、消除卡顿。
     const tSec = now / 1000;
     const amp = motion.isOrbiting() ? 0 : microEnv * MICRO_AMP;
-    // 呼吸波：strict 实心定形里字钉在格上（清晰），生命感由此显示层"协调荡漾"提供 ——
-    // 相位是位置的平滑函数 → 整字像一片水波同向起伏（协调），而非各自乱抖。拖动/环绕时不荡。
-    const breathing = shapeActive && currentConstraint === 'strict'
-      && !motion.isOrbiting() && !dragging;
     for (const char of pool.getAll()) {
       // 流动淡入/淡出（开放笔画首端淡入、尾端淡出）与螺旋淡入淡出 alpha 相乘。
       const eff = char.alpha * (char.flowFade != null ? char.flowFade : 1);
       if (eff > 0.01) {
-        let mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
-        let my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
-        if (breathing && !transitIds.has(char.id)) {
-          const ph = char.gridX * 0.55 + char.gridY * 0.42; // 位置相位 → 协调行波
-          mx += Math.sin(tSec * 1.7 + ph) * BREATHE_AMP;
-          my += Math.cos(tSec * 1.4 + ph * 0.8) * BREATHE_AMP;
-        }
+        const mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
+        const my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
         ctx.globalAlpha = eff;
-        ctx.fillText(char.char,
-          char.displayX + CELL_SIZE / 2 + mx,
-          char.displayY + CELL_SIZE / 2 + my);
+        ctx.drawImage(getGlyph(char.char),
+          char.displayX + mx, char.displayY + my, CELL_SIZE, CELL_SIZE);
       }
     }
     ctx.globalAlpha = 1;

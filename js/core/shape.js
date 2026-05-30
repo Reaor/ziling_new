@@ -91,14 +91,13 @@ export class ShapeSystem {
    */
   sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 120) {
     const text = EMOJI_TEMPLATES[emojiKey] ? emojiKey : '^_^';
-    // 颜文字 = 实心定形（不再细化骨架、不再逐笔淡入淡出 —— 那样画面发乱、难辨形）。
-    // 用**细描边**（常规字重 + 薄描边）让眼睛不臃肿、和细的"嘴"粗细匹配、协调成脸；
-    // 按覆盖率点亮格子、均匀抽稀。里字在掩码内做小幅华容道滑动（strict）→ 形稳又灵动。
-    const cells = this._rasterToCells(gridCols, gridRows, 0.32, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, text, W * 0.92, H * 0.46);
+    // 颜文字 = 实心定形：眼/嘴笔画有 ≥2 格宽身段（配合较高网格分辨率）→ 里字在笔画内
+    // "转大圈"循环流动（满填循环 flowfill），既动态又辨形稳、眼嘴粗细协调成脸。
+    const cells = this._rasterToCells(gridCols, gridRows, 0.30, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, text, W * 0.92, H * 0.50);
       this._drawTextMask(ctx, text, W / 2, H / 2, fs, {
-        weight: 400,
-        strokeWidth: Math.max(SS * 0.25, fs * 0.02),
+        weight: 600,
+        strokeWidth: Math.max(SS * 0.35, fs * 0.028),
       });
     });
     const mask = this._sparsify(cells, maxChars);
@@ -123,15 +122,14 @@ export class ShapeSystem {
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
   sampleMegachar(char, gridCols, gridRows, maxChars = 200, direction = 'horizontal') {
-    // 巨字 = 实心定形：里字填满字身 → 即时辨形，且对任意汉字都稳健（只需栅格化，不依赖
-    // 脆弱的细化/追踪，适合运行时即时呈现 AI 给出的不同巨字）。用**较细的笔画**（常规偏中
-    // 字重 + 薄描边 + 较高覆盖率阈值）→ 像"春"这种密笔画字的横笔能分开、不糊成一团，
-    // 各笔画粗细均匀（不再有的笔画臃肿有的稀疏）。里字在掩码内做小幅华容道滑动（strict）。
-    const cells = this._rasterToCells(gridCols, gridRows, 0.48, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, char, W * 0.86, H * 0.86);
+    // 巨字 = 实心定形：里字填满字身 → 即时辨形，对任意汉字都稳健（只需栅格化）。笔画有
+    // ≥2 格宽身段（配合较高网格分辨率，密笔画字如"春"仍分得开），里字在笔画内"转大圈"
+    // 循环流动（满填循环 flowfill）→ 既动态呈现又辨形稳。
+    const cells = this._rasterToCells(gridCols, gridRows, 0.40, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, char, W * 0.84, H * 0.84);
       this._drawTextMask(ctx, char, W / 2, H / 2, fs, {
-        weight: 500,
-        strokeWidth: Math.max(SS * 0.2, fs * 0.005),
+        weight: 700,
+        strokeWidth: Math.max(SS * 0.3, fs * 0.015),
       });
     });
     const mask = this._sparsify(cells, maxChars);
