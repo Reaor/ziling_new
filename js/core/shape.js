@@ -337,11 +337,38 @@ export class ShapeSystem {
     const skel = this._thinZS(solid, cols, rows);
     let lines = this._traceSkeleton(skel, cols, rows);
     if (lines.length === 0) lines = [{ line: this._nnChain(solid), loop: false }];
-    // 不再插桥接格（那会把尖角补成方块、笔画臃肿）。保留 1 格宽中心线（含对角步），
-    // 尖角保持锐利；流动时由 PIBT 以横纵两步走过对角，瞬时经过、不破坏静态字形。
+    // 中心线含对角步（撇/捺/尖角）。里字只走上下左右(4连通)，对角目标的正交桥接格
+    // 若不在掩码内 → 里字到不了下一格 → 流动卡死；而卡住的里字停在淡入/淡出区
+    // (flowFade→0) 会隐形，于是整条斜笔画"缺失/静止/看不到流动"。故在每个对角步间
+    // 补一个正交桥接格，令路径 4 连通：里字逐格顺畅流动、淡入淡出正常、笔画完整可见。
     return lines
-      .filter(l => l.line.length >= 1)
-      .map(l => ({ cells: l.line, loop: l.loop }));
+      .map(l => ({ cells: this._bridgeDiagonals(l.line, l.loop), loop: l.loop }))
+      .filter(l => l.cells.length >= 1);
+  }
+
+  /**
+   * 让一条有序路径 4 连通：相邻两格若是对角关系，在它们之间插入一个正交桥接格
+   * （横向先行）。闭环路径还会检查首尾衔接处。这样每对相邻格都只差一步上下左右，
+   * 里字流动时总能逐格走到，永不因对角而卡死/隐形。纯函数可测。@private
+   */
+  _bridgeDiagonals(line, loop = false) {
+    if (!line || line.length === 0) return line || [];
+    const out = [line[0]];
+    for (let i = 1; i < line.length; i++) {
+      const a = out[out.length - 1], b = line[i];
+      if (a.x === b.x && a.y === b.y) continue;
+      if (Math.abs(b.x - a.x) === 1 && Math.abs(b.y - a.y) === 1) {
+        out.push({ x: b.x, y: a.y }); // 横向先行的正交桥接格
+      }
+      out.push(b);
+    }
+    if (loop && out.length > 2) {
+      const a = out[out.length - 1], b = out[0];
+      if (Math.abs(b.x - a.x) === 1 && Math.abs(b.y - a.y) === 1) {
+        out.push({ x: b.x, y: a.y }); // 闭环首尾衔接的桥接格
+      }
+    }
+    return out;
   }
 
   /** Zhang-Suen thinning → Set of skeleton cell keys (y*cols+x). @private */
