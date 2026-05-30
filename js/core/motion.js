@@ -628,7 +628,8 @@ export class MotionEngine {
             else this._advanceFlowIndex(char.id);
           } else {
             this._wanderTargets.delete(char.id);
-            // Shape-constrained: pick a new mask cell to keep wandering within shape
+            // strict（颜文字/巨字）= 收紧的就近游走：每个里字持续做小幅横纵位移
+            // （运动范围小、速率相近、没有谁卡死），轮廓收束在字形内、不糊。
             if (this._shapeChars.has(char.id)) {
               this._assignWanderTarget(char);
             }
@@ -650,7 +651,7 @@ export class MotionEngine {
             // 流动中被堵 → 跳到下一路径格绕过拥堵，保持推进不卡死。
             this._advanceFlowIndex(char.id);
           } else {
-            // Force a new target far away — PIBT will naturally find a way out
+            // Force a new target — PIBT will naturally find a way out
             this._assignWanderTarget(char);
           }
           this._stuckTicks.set(char.id, 0);
@@ -899,12 +900,20 @@ export class MotionEngine {
    * 持续运动、绝不冻结。
    */
   _pickLocalShapeTarget(candidates, char) {
-    // 紧约束：只滑向**紧邻**的空格（曼哈顿≤2）→ 轮廓稳定、只做小幅错动而非游走。
-    // 邻近无空格就留在原地（返回 null → 不设目标），避免被挤出去破坏字形。
-    const near = candidates.filter(c =>
-      Math.abs(c.x - char.gridX) + Math.abs(c.y - char.gridY) <= 2);
-    if (near.length === 0) return null;
-    return near[Math.floor(Math.random() * near.length)];
+    // 收紧约束：里字**拴在自己的锚点格附近**（曼哈顿≤2）做小幅横纵位移 → 运动范围
+    // 小、形状收束稳定、又持续在动（不是无界游走、也不是卡死）。锚点附近暂无空格时
+    // 退而求其次滑向离锚点最近的空格，始终被拉回字形。
+    const ax = char.anchorX != null ? char.anchorX : char.gridX;
+    const ay = char.anchorY != null ? char.anchorY : char.gridY;
+    const near = candidates.filter(c => Math.abs(c.x - ax) + Math.abs(c.y - ay) <= 2);
+    if (near.length > 0) return near[Math.floor(Math.random() * near.length)];
+    // 离锚点太远（被挤出）→ 朝最靠近锚点的空格走，收回字形。
+    let best = null, bestD = Infinity;
+    for (const c of candidates) {
+      const d = Math.abs(c.x - ax) + Math.abs(c.y - ay);
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    return best;
   }
 
   _pickShapeTarget(candidates, char) {
@@ -943,25 +952,29 @@ export class MotionEngine {
   _assignShapeTargets() {
     if (!this._shapeMask || this._shapeMask.length === 0) return;
 
-    // Sorted (row-major) assignment: matching里字 and cells in the same spatial
-    // order fans the swarm out with far fewer path crossings than greedy-nearest,
-    // so strict formations actually converge tight instead of jamming.
+    // 就近贪心分配锚点：每个里字认领离自己最近的、尚未被认领的字形格。位移最小、
+    // **不会被派到够不着的分块**（颜文字眼/嘴不连通时尤其重要），空位自然落在远离
+    // 所有里字的位置而均匀分散。里字已在字形内（螺旋落位）时几乎零位移、即时成形。
     const chars = [...this._shapeChars]
       .map(id => this.characters.get(id))
       .filter(Boolean)
+      // 先到先挑：让位移大的里字先选，减少长距离穿插。
       .sort((a, b) => (a.gridY - b.gridY) || (a.gridX - b.gridX));
-    const cells = this._shapeMask.slice()
-      .sort((a, b) => (a.y - b.y) || (a.x - b.x));
+    const cells = this._shapeMask;
+    const used = new Array(cells.length).fill(false);
 
-    const n = Math.min(chars.length, cells.length);
-    // 字少于格时，把里字均匀铺到掩码（floor(i*cells/chars)），让空位均匀分散在
-    // 整个字形而非堆在一边 → 轮廓处处饱满、清爽。
-    const spread = chars.length < cells.length;
-    for (let i = 0; i < n; i++) {
-      const char = chars[i];
-      const cell = cells[spread ? Math.floor(i * cells.length / chars.length) : i];
+    for (const char of chars) {
+      let bi = -1, bd = Infinity;
+      for (let i = 0; i < cells.length; i++) {
+        if (used[i]) continue;
+        const d = Math.abs(cells[i].x - char.gridX) + Math.abs(cells[i].y - char.gridY);
+        if (d < bd) { bd = d; bi = i; }
+      }
+      if (bi < 0) break; // 格子被认领光（里字多于格）→ 余下里字保持原目标
+      used[bi] = true;
+      const cell = cells[bi];
       this._wanderTargets.set(char.id, { tx: cell.x, ty: cell.y });
-      char.anchorX = cell.x; // formation slot — strict shapes hold here
+      char.anchorX = cell.x; // formation slot — strict shapes wiggle around here
       char.anchorY = cell.y;
       this._stuckTicks.set(char.id, 0);
     }
