@@ -780,9 +780,10 @@ function testMaskToPathsSplitsComponentsAndCoversCells() {
   }
 }
 
-// Regression: 字形 → 骨架细笔画. A solid thick bar thins to a ~1-wide centre line
-// whose path is 4-connected (so flow targets are always adjacent → smooth).
-function testGlyphToPathsThinsToFourConnectedStrokes() {
+// Regression: 字形 → 骨架细笔画. A solid thick bar thins to a ~1-wide centre line.
+// Steps are 8-connected (diagonals kept, no bridge → 尖角锐利). Flow walks diagonals
+// in two横纵 steps.
+function testGlyphToPathsThinsToOneWideStrokes() {
   const shapes = new ShapeSystem();
   const cols = 24, rows = 43;
   const solid = [];
@@ -791,19 +792,53 @@ function testGlyphToPathsThinsToFourConnectedStrokes() {
 
   assert.ok(paths.length >= 1, 'bar yields at least one stroke path');
   const main = paths.reduce((a, b) => (b.cells.length > a.cells.length ? b : a));
-  // skeleton centre line is far thinner than the solid (≈ length, not area)
   assert.ok(main.cells.length <= 20, `centre line is thin, got ${main.cells.length}`);
   assert.ok(main.cells.length >= 8, `centre line spans the bar, got ${main.cells.length}`);
-  // every consecutive pair is 4-adjacent (bridged), so flow never targets a diagonal
   for (let i = 1; i < main.cells.length; i++) {
     const a = main.cells[i - 1], b = main.cells[i];
-    assert.equal(Math.abs(a.x - b.x) + Math.abs(a.y - b.y), 1, 'path is 4-connected');
+    assert.ok(Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y)) === 1, 'path cells are adjacent');
   }
+}
+
+// Open-stroke flow = 单向传送带 + 尾端回收到首端：里字持续单向流动、人人都动、不重叠，
+// 且尾端 flowFade→0（淡出）、首端 flowFade→0（淡入）。
+function testOpenStrokeConveyorRecyclesAndKeepsEveryoneMoving() {
+  const grid = new Grid(24, 43);
+  const pool = new CharacterPool(80);
+  const motion = new MotionEngine(grid, 16, 0);
+  const cells = [];
+  for (let x = 4; x <= 18; x++) cells.push({ x, y: 20 }); // 15-cell horizontal stroke
+  const chars = [];
+  for (let i = 0; i < 10; i++) { // start off-stroke → flow in
+    const c = pool.acquire('字', 1 + (i % 3), 1 + ((i / 3) | 0));
+    chars.push(c); motion.registerCharacter(c);
+  }
+  motion.setFlowPaths([{ cells, loop: false }], chars.map(c => c.id));
+
+  const moves = new Map(chars.map(c => [c.id, 0]));
+  let recycles = 0;
+  const lastI = new Map();
+  for (let t = 0; t < 220; t++) {
+    const before = new Map(chars.map(c => [c.id, c.gridX + ',' + c.gridY]));
+    motion.update(160);
+    for (const c of chars) {
+      if (before.get(c.id) !== c.gridX + ',' + c.gridY) moves.set(c.id, moves.get(c.id) + 1);
+      const o = motion._flowOf.get(c.id);
+      if (o) { if (lastI.get(c.id) === 14 && o.i === 0) recycles++; lastI.set(c.id, o.i); }
+    }
+    // never overlap
+    const seen = new Set();
+    for (const c of chars) { const k = c.gridX + ',' + c.gridY; assert.ok(!seen.has(k), 'no overlap'); seen.add(k); }
+  }
+  const mv = [...moves.values()].sort((a, b) => a - b);
+  assert.ok(mv[0] >= 10, `every char keeps moving (min ${mv[0]})`);
+  assert.ok(recycles >= 3, `tail→head recycling happens (${recycles})`);
 }
 
 await testDoubleTapUsesGridCoordinates();
 await testSingleTapFiresImmediately();
-testGlyphToPathsThinsToFourConnectedStrokes();
+testGlyphToPathsThinsToOneWideStrokes();
+testOpenStrokeConveyorRecyclesAndKeepsEveryoneMoving();
 testMaskToPathsSplitsComponentsAndCoversCells();
 testFlowStreamsAlongPathStayingOnTrack();
 testOpenStrokePingPongFlowKeepsMoving();
