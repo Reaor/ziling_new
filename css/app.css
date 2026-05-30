@@ -9,8 +9,10 @@ body {
 }
 
 #app-container {
-  width: 390px;
-  height: 700px;
+  /* 自适应：随设备窗口缩放，并限制在一个比常见手机页略小的上限内
+     （为后续 app 自身 UI 留出空间）。宽高用 min(vw/vh, 上限) 兼顾小屏与大屏。 */
+  width: min(92vw, 300px);
+  height: min(88vh, 540px);
   position: relative;
   overflow: hidden;
   background: #1a1a2e;
