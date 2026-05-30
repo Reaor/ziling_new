@@ -21,7 +21,7 @@ import { Renderer } from './render/renderer.js';
 import { Grid } from './core/grid.js';
 import { CharacterPool } from './core/character.js';
 import { MotionEngine } from './core/motion.js';
-import { ShapeSystem } from './core/shape.js';
+import { ShapeSystem, EMOJI_TEMPLATES } from './core/shape.js';
 import { GestureRecognizer } from './input/gestures.js';
 
 const CELL_SIZE = 15;          // 网格分辨率：笔画变细后适当调大格子 → 画面不空、里字更大更美观
@@ -43,10 +43,13 @@ const FLOW_FILL_LOOP = 0.95;
 // 骨架细笔画（颜文字/巨字）是 1 格宽中心线：开放笔画走"单向传送带+尾端淡出/首端淡入"，
 // 留约 1/4 空位让传送带顺畅流动、人人都动（细处也不静止）。闭环（曲线/眼睛 o）用 LOOP。
 const FLOW_FILL_STROKE = 0.78;
-// strict（颜文字/巨字）：密集定形 → 里字填满字身、轮廓清爽稳定、易辨形。留约 10%
-// 空位让里字做华容道小幅滑动（动态呈现、有生命感），既不静止也不破坏字形。
-// 0.90 是辨形（要填满）与灵动（要留缝隙滑动）的平衡点，密度低于 ~0.8 复杂字会发虚。
-const STRICT_FILL = 0.90;
+// strict（颜文字/巨字）= 实心定形：里字**填满每个掩码格(100%)并钉在格上保持清晰**
+// （易辨形、对任意字都稳）。绝不做自由华容道滑动 —— 那会把清晰字形搅成一团散沙
+// （实测：±2 自由滑动后"春"完全糊掉）。生命感改由显示层的"协调呼吸波"提供。
+const STRICT_FILL = 1.0;
+// 呼吸波：strict 形状里字在显示层按"位置相位 + 时间"做协调的轻荡（整字像水波荡漾，
+// 不是各自乱抖）→ 既清晰又灵动。AMP=幅度(px)，越大越活泼但别糊字。
+const BREATHE_AMP = 2.2;
 // 微动：MICRO_AMP=点击反应脉冲幅度(px，点击时全体轻摆一下后衰减)；DECAY=衰减时长。
 const MICRO_AMP = 5.5;
 const MICRO_DECAY_MS = 700;
@@ -223,15 +226,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  function applyShape(index) {
-    shapeIndex = ((index % SHAPES.length) + SHAPES.length) % SHAPES.length;
-    const def = SHAPES[shapeIndex];
-    const sampled = def.make(def.cells);
+  // 把一份采样结果（mask 或 paths）成形。供双击循环、调试面板任意字/颜文字/曲线共用。
+  function formSampled(sampled, label = 'shape') {
     shapeActive = true;
     let target = 0;
     if (sampled.paths && sampled.paths.length > 0) {
-      // 颜文字/巨字（骨架细笔画）/ 曲线 → flow 沿线流动。闭环近乎全覆盖、开放笔画留
-      // 空位供流动。每条笔画**至少留 1 个空位**（容量上限），否则满路径会流动死锁。
+      // 曲线/数学曲线 → flow 沿线流动。闭环近乎全覆盖、开放笔画留空位供流动。
       currentConstraint = 'flow';
       currentPaths = sampled.paths;
       currentCells = sampled.paths.flatMap(p => p.cells);
@@ -240,20 +240,39 @@ document.addEventListener('DOMContentLoaded', () => {
         target += Math.round(p.cells.length * (p.loop ? FLOW_FILL_LOOP : FLOW_FILL_STROKE));
         capacity += Math.max(0, p.cells.length - 1);
       }
-      target = Math.min(Math.max(MIN_CHARS, target), capacity); // MIN 不得超过容量
+      target = Math.min(Math.max(MIN_CHARS, target), capacity);
     } else if (sampled.mask && sampled.mask.length > 0) {
+      // 颜文字/巨字 → strict 实心定形：里字数 = 掩码格数（100% 填满 → 清晰），不强行
+      // 抬到 MIN_CHARS（否则小字形会多出无处安放的里字到处乱游）。
       currentConstraint = 'strict';
       currentPaths = null;
       currentCells = sampled.mask;
-      target = Math.max(MIN_CHARS, Math.round(sampled.mask.length * STRICT_FILL));
+      target = sampled.mask.length;
     } else {
       return;
     }
     target = Math.min(MAX_CHARS, target);
-    // 里字数随形状自适应（螺旋淡入/淡出）。
     adaptCharCount(target, currentCells);
     formCurrent();
-    console.log(`Shape → ${def.name} (${currentConstraint}, ${currentCells.length} cells, ${aliveIds().length}里字)`);
+    console.log(`Shape → ${label} (${currentConstraint}, ${currentCells.length} cells, ${aliveIds().length}里字)`);
+  }
+
+  function applyShape(index) {
+    shapeIndex = ((index % SHAPES.length) + SHAPES.length) % SHAPES.length;
+    const def = SHAPES[shapeIndex];
+    formSampled(def.make(def.cells), def.name);
+  }
+
+  // 调试入口：即时呈现任意巨字(串)/指定颜文字/指定曲线（接入云端 AI 后即用这些）。
+  function applyMegachar(text) {
+    if (!text) return;
+    formSampled(shapes.sampleMegachar(text, gridCols, gridRows, MAX_CHARS), '巨字 ' + text);
+  }
+  function applyEmojiKey(key) {
+    formSampled(shapes.sampleEmoji(key, gridCols, gridRows, 150), key);
+  }
+  function applyCurve(type) {
+    formSampled(shapes.sampleCurveOrdered(type, gridCols, gridRows, 110), type);
   }
 
   function releaseShape() {
@@ -288,6 +307,79 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Form the first shape shortly after load.
   setTimeout(() => applyShape(0), 800);
+
+  // ── 调试面板（网页快捷查验：任意巨字 / 全部颜文字 / 曲线）─────────────────
+  // 接入云端 AI 后即用 applyMegachar/applyEmojiKey 这些入口即时呈现任意字。
+  buildDebugPanel();
+  function buildDebugPanel() {
+    const overlay = document.getElementById('ui-overlay');
+    if (!overlay) return;
+    const stop = e => e.stopPropagation();
+    const mkBtn = (label, fn) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = 'padding:5px 8px;background:#22304d;color:#eaeaea;border:1px solid #3c4f76;'
+        + 'border-radius:6px;font-size:13px;line-height:1;cursor:pointer;';
+      b.addEventListener('pointerdown', stop);
+      b.addEventListener('click', e => { stop(e); fn(); });
+      return b;
+    };
+    const row = () => {
+      const r = document.createElement('div');
+      r.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px;align-items:center;';
+      return r;
+    };
+
+    const body = document.createElement('div');
+    body.style.cssText = 'position:absolute;left:6px;right:6px;bottom:6px;display:none;'
+      + 'flex-direction:column;gap:5px;padding:7px;background:rgba(8,10,16,0.72);'
+      + 'border-radius:10px;max-height:48%;overflow:auto;backdrop-filter:blur(2px);';
+    body.addEventListener('pointerdown', stop);
+
+    // 任意巨字
+    const r1 = row();
+    const input = document.createElement('input');
+    input.type = 'text'; input.value = '永'; input.maxLength = 6;
+    input.style.cssText = 'width:84px;padding:5px;border-radius:6px;border:1px solid #3c4f76;'
+      + 'background:#0d1320;color:#fff;font-size:14px;';
+    input.addEventListener('pointerdown', stop);
+    input.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') applyMegachar(input.value.trim()); });
+    r1.append(makeLabel('巨字'), input, mkBtn('呈现', () => applyMegachar(input.value.trim())));
+    for (const ch of ['春', '心', '爱', '福', '龙']) r1.append(mkBtn(ch, () => applyMegachar(ch)));
+
+    // 全部颜文字
+    const r2 = row(); r2.append(makeLabel('颜文字'));
+    for (const key of Object.keys(EMOJI_TEMPLATES)) r2.append(mkBtn(key, () => applyEmojiKey(key)));
+
+    // 曲线
+    const r3 = row(); r3.append(makeLabel('曲线'));
+    const curves = [['心', 'heart'], ['四叶花', 'rose'], ['圆', 'circle'], ['无穷', 'lemniscate'], ['五角星', 'star']];
+    for (const [label, type] of curves) r3.append(mkBtn(label, () => applyCurve(type)));
+
+    // 杂项
+    const r4 = row();
+    r4.append(mkBtn('下一个形状', () => applyShape(shapeIndex + 1)));
+    r4.append(mkBtn('自由漫游', () => releaseShape()));
+
+    body.append(r1, r2, r3, r4);
+
+    const toggle = mkBtn('调试 ⚙', () => {
+      body.style.display = body.style.display === 'none' ? 'flex' : 'none';
+    });
+    toggle.style.position = 'absolute';
+    toggle.style.right = '6px';
+    toggle.style.top = '6px';
+    toggle.style.opacity = '0.8';
+
+    overlay.append(toggle, body);
+
+    function makeLabel(t) {
+      const s = document.createElement('span');
+      s.textContent = t;
+      s.style.cssText = 'color:#8fa8d6;font-size:12px;margin-right:2px;';
+      return s;
+    }
+  }
 
   // ── Drag state ────────────────────────────────────────────
   let dragging = false;
@@ -403,12 +495,21 @@ document.addEventListener('DOMContentLoaded', () => {
     // 形状的生命感来自里字本身收紧的横纵位移，不再叠加常驻颤动（那样各自乱抖、不协调）。
     const tSec = now / 1000;
     const amp = motion.isOrbiting() ? 0 : microEnv * MICRO_AMP;
+    // 呼吸波：strict 实心定形里字钉在格上（清晰），生命感由此显示层"协调荡漾"提供 ——
+    // 相位是位置的平滑函数 → 整字像一片水波同向起伏（协调），而非各自乱抖。拖动/环绕时不荡。
+    const breathing = shapeActive && currentConstraint === 'strict'
+      && !motion.isOrbiting() && !dragging;
     for (const char of pool.getAll()) {
       // 流动淡入/淡出（开放笔画首端淡入、尾端淡出）与螺旋淡入淡出 alpha 相乘。
       const eff = char.alpha * (char.flowFade != null ? char.flowFade : 1);
       if (eff > 0.01) {
-        const mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
-        const my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
+        let mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
+        let my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
+        if (breathing && !transitIds.has(char.id)) {
+          const ph = char.gridX * 0.55 + char.gridY * 0.42; // 位置相位 → 协调行波
+          mx += Math.sin(tSec * 1.7 + ph) * BREATHE_AMP;
+          my += Math.cos(tSec * 1.4 + ph * 0.8) * BREATHE_AMP;
+        }
         ctx.globalAlpha = eff;
         ctx.fillText(char.char,
           char.displayX + CELL_SIZE / 2 + mx,

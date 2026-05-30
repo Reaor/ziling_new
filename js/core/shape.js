@@ -234,6 +234,16 @@ export class ShapeSystem {
         const r = Math.cos(2 * t) * scale;
         x = cx + r * Math.cos(t);
         y = cy + r * Math.sin(t);
+      } else if (type === 'lemniscate') {
+        // ∞ 双纽线（Lemniscate of Bernoulli 的参数形式）
+        const d = 1 + Math.sin(t) * Math.sin(t);
+        x = cx + (scale * 1.35) * Math.cos(t) / d;
+        y = cy + (scale * 1.35) * Math.sin(t) * Math.cos(t) / d;
+      } else if (type === 'star') {
+        // 五角星（半径随 cos(5θ) 起伏）
+        const r = scale * (0.62 + 0.38 * Math.cos(5 * t));
+        x = cx + r * Math.cos(t - Math.PI / 2);
+        y = cy + r * Math.sin(t - Math.PI / 2);
       } else {
         x = cx + scale * Math.cos(t);
         y = cy + scale * Math.sin(t);
