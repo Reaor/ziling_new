@@ -43,10 +43,8 @@ const FLOW_FILL_LOOP = 0.95;
 const FLOW_FILL_STROKE = 0.70;
 // strict（颜文字/巨字）：密集定形、紧约束就近微动。填得很满 → 轮廓清爽稳定、易辨形
 // （留极少空位让里字轻微错动、配合微动呼吸即有生命感，不靠大幅游走）。
-const STRICT_FILL = 0.90;
-// 微动：MICRO_BREATH=常驻"呼吸"幅度(px，亚像素，给密集定形的形状生命感)；
-// MICRO_AMP=点击脉冲幅度(px，全体一起轻摆后衰减)；MICRO_DECAY_MS=脉冲衰减时长。
-const MICRO_BREATH = 1.1;
+const STRICT_FILL = 0.85;
+// 微动：MICRO_AMP=点击反应脉冲幅度(px，点击时全体轻摆一下后衰减)；DECAY=衰减时长。
 const MICRO_AMP = 5.5;
 const MICRO_DECAY_MS = 700;
 const BREAK_PROB = 0.3;        // 点击概率打破轮廓（里字散成自由云团再归位）
@@ -394,17 +392,14 @@ document.addEventListener('DOMContentLoaded', () => {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#e0e0e0';
-    // 微动 = 常驻"呼吸"（亚像素轻摆，给密集定形的形状以生命感、不破坏轮廓）
-    //      + 点击触发的一次性"轻摆"脉冲（microEnv 由 1 衰减）。拖动时都不叠加。
+    // 微动：仅保留**点击反应**的一次性"轻摆"脉冲（microEnv 由 1 衰减），平时为 0。
+    // 形状的生命感来自里字本身收紧的横纵位移，不再叠加常驻颤动（那样各自乱抖、不协调）。
     const tSec = now / 1000;
-    const orbiting = motion.isOrbiting();
-    const breath = orbiting ? 0 : MICRO_BREATH;
-    const pulse = orbiting ? 0 : microEnv * MICRO_AMP;
-    const amp = breath + pulse;
+    const amp = motion.isOrbiting() ? 0 : microEnv * MICRO_AMP;
     for (const char of pool.getAll()) {
       if (char.alpha > 0.01) {
-        const mx = amp ? Math.sin(tSec * 2.6 + char.id * 1.3) * amp : 0;
-        const my = amp ? Math.cos(tSec * 2.2 + char.id * 2.1) * amp : 0;
+        const mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
+        const my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
         ctx.globalAlpha = char.alpha;
         ctx.fillText(char.char,
           char.displayX + CELL_SIZE / 2 + mx,

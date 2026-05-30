@@ -358,9 +358,11 @@ function testShapeDragUsesBroadTargetsInsteadOfNearestLock() {
     for (let x = 5; x < 19; x++) mask.push({ x, y });
   }
 
-  motion.setShapeMask(mask, [char.id]);
-  motion.beginShapeDrag();
-  motion.previewShapeDrag(2, 0);
+  // loose 形状在拖动偏置下应"翻涌"——给一个远的（broad）掩码目标，而非锁最近格。
+  motion.setShapeMask(mask, [char.id], 'loose');
+  motion.dragBias = { dx: 1, dy: 0, strength: 1 };
+  motion._wanderTargets.delete(char.id);
+  motion._assignWanderTarget(char);
   const target = motion._wanderTargets.get(char.id);
   const dist = Math.abs(target.tx - char.gridX) + Math.abs(target.ty - char.gridY);
 
