@@ -19,6 +19,14 @@ const DIRS = [
   { dx:  1, dy:  0 },
 ];
 
+// flow（沿线流动）额外允许 4 个对角方向：细化出的骨架斜笔画（撇/捺/尖角）含对角步，
+// 若只走上下左右则到不了对角的下一格→卡死，旧方案靠"加粗桥接"补正交格但会把细线重新
+// 变粗成块。允许对角移动后，里字一步即可沿斜线走到下一骨架格→笔画保持 1 格宽的单薄细线。
+const DIRS_DIAG = [
+  { dx: -1, dy: -1 }, { dx: 1, dy: -1 }, { dx: -1, dy: 1 }, { dx: 1, dy: 1 },
+];
+const DIRS8 = [...DIRS, ...DIRS_DIAG];
+
 const STUCK_LIMIT = 5; // ticks before aggressive target reassignment
 
 export class MotionEngine {
@@ -832,9 +840,11 @@ export class MotionEngine {
     const isInsideShape = isShape && this._shapeMaskSet.size > 0 &&
       this._inMask(char.gridX, char.gridY);
 
-    // Candidates: [stay] + [4 neighbors] — only unoccupied
+    // Candidates: [stay] + [neighbors] — only unoccupied. flow 用 8 邻域（含对角），
+    // 让里字能沿细化骨架的斜笔画逐格流动、不靠加粗桥接、保持单薄细线；其余模式仍 4 邻域。
+    const dirs = this._shapeConstraint === 'flow' ? DIRS8 : DIRS;
     const cands = [{ x: char.gridX, y: char.gridY, stay: true }];
-    for (const d of DIRS) {
+    for (const d of dirs) {
       const nx = char.gridX + d.dx;
       const ny = char.gridY + d.dy;
       if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;

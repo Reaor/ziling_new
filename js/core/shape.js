@@ -122,21 +122,23 @@ export class ShapeSystem {
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
   sampleMegachar(char, gridCols, gridRows, maxChars = 200, direction = 'horizontal') {
-    // 巨字 = 实心定形：里字填满字身 → 即时辨形，对任意汉字都稳健（只需栅格化）。笔画有
-    // ≥2 格宽身段（配合较高网格分辨率，密笔画字如"春"仍分得开），里字在笔画内"转大圈"
-    // 循环流动（满填循环 flowfill）→ 既动态呈现又辨形稳。
-    const cells = this._rasterToCells(gridCols, gridRows, 0.44, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, char, W * 0.74, H * 0.74);
+    // 巨字 = 细化成 1 格宽的中心线（骨架），追踪成若干有序笔画路径 → 一排里字沿线流动
+    // （清爽、单薄、易辨形，像心形曲线那样运动）。先栅格化实心字身，再 Zhang-Suen 细化、
+    // 追踪笔画、**不做对角桥接**（保持细线）；motion 的 flow 用 8 邻域让里字沿斜笔画流动。
+    const solid = this._rasterToCells(gridCols, gridRows, 0.40, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, char, W * 0.82, H * 0.60);
       this._drawTextMask(ctx, char, W / 2, H / 2, fs, {
-        weight: 600,
-        strokeWidth: Math.max(SS * 0.25, fs * 0.012),
+        weight: 500,
+        strokeWidth: Math.max(SS * 0.18, fs * 0.008),
       });
     });
-    const mask = this._sparsify(cells, maxChars);
-    this.currentMask = mask;
+    const paths = this._glyphToPaths(solid, gridCols, gridRows, false);
+    const cells = paths.flatMap(p => p.cells);
+    this.currentMask = cells;
     this.currentShape = char;
-    this.constraintType = 'strict';
-    return { mask, constraint: 'strict' };
+    this.constraintType = 'flow';
+    // 巨字 → 多条开放笔画路径，里字沿各笔画单向流动（首尾淡入淡出、传送带回收）。
+    return { mask: cells, paths, constraint: 'flow', ordered: true };
   }
 
   /* ----------------------------------------------------------
@@ -344,11 +346,16 @@ export class ShapeSystem {
    * @param {Array<{x,y}>} solid @param {number} cols @param {number} rows
    * @returns {Array<{cells:Array<{x,y}>, loop:boolean}>}
    */
-  _glyphToPaths(solid, cols, rows) {
+  _glyphToPaths(solid, cols, rows, bridge = true) {
     if (!solid || solid.length === 0) return [];
     const skel = this._thinZS(solid, cols, rows);
     let lines = this._traceSkeleton(skel, cols, rows);
     if (lines.length === 0) lines = [{ line: this._nnChain(solid), loop: false }];
+    // bridge=false：保留 1 格宽中心线（含对角步）→ 配合 flow 的 8 邻域对角移动，里字沿斜
+    // 笔画逐格流动、笔画维持单薄细线（清爽、易辨形，像心形曲线那样运动）。
+    if (!bridge) {
+      return lines.map(l => ({ cells: l.line, loop: l.loop })).filter(l => l.cells.length >= 1);
+    }
     // 中心线含对角步（撇/捺/尖角）。里字只走上下左右(4连通)，对角目标的正交桥接格
     // 若不在掩码内 → 里字到不了下一格 → 流动卡死；而卡住的里字停在淡入/淡出区
     // (flowFade→0) 会隐形，于是整条斜笔画"缺失/静止/看不到流动"。故在每个对角步间
@@ -431,26 +438,44 @@ export class ShapeSystem {
     const deg = (k) => nbrs(k).length;
     const toXY = (k) => ({ x: k % cols, y: (k - (k % cols)) / cols });
     const eKey = (a, b) => a < b ? a + '_' + b : b + '_' + a;
+    const dirOf = (a, b) => [Math.sign((b % cols) - (a % cols)), Math.sign(((b - b % cols) / cols) - ((a - a % cols) / cols))];
     const usedEdge = new Set();
     const paths = [];
 
+    // 直通追踪：走到节点（含交叉点 degree>2）时不断开，而是挑"最顺直"（与当前方向夹角
+    // 最小）的未用边继续走 → 把在交叉处相接的笔段并成一条长路径。汉字交叉点多，若每个
+    // 交叉都断开会碎成几十条 1~2 格的小段（里字无处流动→静止），直通合并后是少数长笔画，
+    // 里字成排连贯流动（清爽单薄、像曲线那样运动）。
     const walk = (start, first) => {
       const line = [toXY(start)];
-      let prev = start, cur = first;
+      let prev = start, cur = first, pd = dirOf(start, first);
       usedEdge.add(eKey(start, first));
       while (true) {
         line.push(toXY(cur));
-        if (deg(cur) !== 2) break;
-        const next = nbrs(cur).find(n => n !== prev && !usedEdge.has(eKey(cur, n)));
-        if (next === undefined) break;
-        usedEdge.add(eKey(cur, next));
-        prev = cur; cur = next;
+        const cand = nbrs(cur).filter(n => n !== prev && !usedEdge.has(eKey(cur, n)));
+        if (cand.length === 0) break;
+        let best = cand[0], bestDot = -9;
+        for (const n of cand) {
+          const d = dirOf(cur, n);
+          const dot = d[0] * pd[0] + d[1] * pd[1]; // 越接近同向 dot 越大 → 最顺直
+          if (dot > bestDot) { bestDot = dot; best = n; }
+        }
+        usedEdge.add(eKey(cur, best));
+        pd = dirOf(cur, best); prev = cur; cur = best;
       }
       return line;
     };
 
+    // 先从端点(度1)起笔 → 笔画从笔尖开始；再处理交叉点(度>2)的剩余边；再是纯环(度2)。
     for (const k of on) {
-      if (deg(k) === 2) continue;
+      if (deg(k) !== 1) continue;
+      for (const n of nbrs(k)) {
+        if (usedEdge.has(eKey(k, n))) continue;
+        paths.push({ line: walk(k, n), loop: false });
+      }
+    }
+    for (const k of on) {
+      if (deg(k) <= 2) continue;
       for (const n of nbrs(k)) {
         if (usedEdge.has(eKey(k, n))) continue;
         paths.push({ line: walk(k, n), loop: false });
