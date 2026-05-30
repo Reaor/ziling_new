@@ -89,22 +89,23 @@ export class ShapeSystem {
    * @param {number} [maxChars=80]
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
-  sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 84) {
+  sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 190) {
     const text = EMOJI_TEMPLATES[emojiKey] ? emojiKey : '^_^';
-    // 颜文字 = 骨架细笔画：渲染实心字形 → 细化成 1 格宽中心线 → 追踪成笔画路径。
-    // 眼/嘴各是一条细线，里字沿线流动（匀布、不在拐角堆积、细处也不静止）。
-    const solid = this._rasterToCells(gridCols, gridRows, 0.16, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, text, W * 0.90, H * 0.54);
-      ctx.font = `${fs}px ${FONT_STACK}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(text, W / 2, H / 2);
+    // 颜文字 = 实心定形（不再细化骨架、不再逐笔淡入淡出 —— 那样画面发乱、难辨形）。
+    // 渲染得稍大、加粗描边让眼/嘴笔画有 2 格宽身段、按覆盖率点亮格子、均匀抽稀到 maxChars。
+    // 里字在掩码内做小幅华容道滑动（strict）→ 形稳易辨、又始终在动（有生命感）。
+    const cells = this._rasterToCells(gridCols, gridRows, 0.30, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, text, W * 0.92, H * 0.42);
+      this._drawTextMask(ctx, text, W / 2, H / 2, fs, {
+        weight: 800,
+        strokeWidth: Math.max(SS * 0.6, fs * 0.05),
+      });
     });
-    const paths = this._glyphToPaths(solid, gridCols, gridRows);
+    const mask = this._sparsify(cells, maxChars);
+    this.currentMask = mask;
     this.currentShape = emojiKey;
-    this.constraintType = 'flow';
-    return { paths, constraint: 'flow' };
+    this.constraintType = 'strict';
+    return { mask, constraint: 'strict' };
   }
 
   /* ----------------------------------------------------------
@@ -121,20 +122,23 @@ export class ShapeSystem {
    *   multi-char 巨字 stacking; a single char always renders upright.
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
-  sampleMegachar(char, gridCols, gridRows, maxChars = 140, direction = 'horizontal') {
-    // 巨字 = 骨架细笔画（用户建议：一横只需一排字）。渲染加粗实心字形保证笔画连贯，
-    // 再细化成 1 格宽中心线、追踪成各笔画路径，里字沿线流动。字少→不挤、不卡、辨形清。
-    const solid = this._rasterToCells(gridCols, gridRows, 0.085, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, char, W * 0.96, H * 0.96);
+  sampleMegachar(char, gridCols, gridRows, maxChars = 320, direction = 'horizontal') {
+    // 巨字 = 实心定形：里字密集填满字身（不是细骨架）→ 即时辨形，且对任意汉字都稳健
+    // （只需栅格化，不依赖脆弱的细化/追踪，适合运行时即时呈现 AI 给出的不同巨字）。
+    // 加粗实心渲染保证笔画连贯，按覆盖率点亮格子、均匀抽稀到 maxChars。里字在掩码内做
+    // 小幅华容道滑动（strict）→ 稳定可辨又始终在动，不用会让画面发乱的逐笔淡入淡出。
+    const cells = this._rasterToCells(gridCols, gridRows, 0.45, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, char, W * 0.86, H * 0.86);
       this._drawTextMask(ctx, char, W / 2, H / 2, fs, {
-        weight: 800,
-        strokeWidth: Math.max(SS * 0.5, fs * 0.024),
+        weight: 900,
+        strokeWidth: Math.max(SS * 0.35, fs * 0.012),
       });
     });
-    const paths = this._glyphToPaths(solid, gridCols, gridRows);
+    const mask = this._sparsify(cells, maxChars);
+    this.currentMask = mask;
     this.currentShape = char;
-    this.constraintType = 'flow';
-    return { paths, constraint: 'flow' };
+    this.constraintType = 'strict';
+    return { mask, constraint: 'strict' };
   }
 
   /* ----------------------------------------------------------
