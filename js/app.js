@@ -40,9 +40,9 @@ const MAX_CHARS = 190;   // 巨字密集定形需要较多里字才能填满字�
 //  - 闭环曲线(心形/花)：近乎全覆盖，线条才连续不断（用户反馈"曲线没被全覆盖"）。
 //  - 开放笔画(颜文字/巨字)：留更多空位 → 传送带推得动、更灵动（不要静止）。
 const FLOW_FILL_LOOP = 0.95;
-// 骨架细笔画（颜文字/巨字）是 1 格宽中心线：填得满些线条才连续可辨，余少量空位供
-// 沿线流动（细处也不静止）。开放笔画用此值，闭环（曲线/眼睛 o）用 LOOP。
-const FLOW_FILL_STROKE = 0.85;
+// 骨架细笔画（颜文字/巨字）是 1 格宽中心线：开放笔画走"单向传送带+尾端淡出/首端淡入"，
+// 留约 1/4 空位让传送带顺畅流动、人人都动（细处也不静止）。闭环（曲线/眼睛 o）用 LOOP。
+const FLOW_FILL_STROKE = 0.78;
 // strict（颜文字/巨字）：密集定形、紧约束就近微动。填得很满 → 轮廓清爽稳定、易辨形
 // （留极少空位让里字轻微错动、配合微动呼吸即有生命感，不靠大幅游走）。
 const STRICT_FILL = 0.85;
@@ -404,10 +404,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const tSec = now / 1000;
     const amp = motion.isOrbiting() ? 0 : microEnv * MICRO_AMP;
     for (const char of pool.getAll()) {
-      if (char.alpha > 0.01) {
+      // 流动淡入/淡出（开放笔画首端淡入、尾端淡出）与螺旋淡入淡出 alpha 相乘。
+      const eff = char.alpha * (char.flowFade != null ? char.flowFade : 1);
+      if (eff > 0.01) {
         const mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
         const my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
-        ctx.globalAlpha = char.alpha;
+        ctx.globalAlpha = eff;
         ctx.fillText(char.char,
           char.displayX + CELL_SIZE / 2 + mx,
           char.displayY + CELL_SIZE / 2 + my);

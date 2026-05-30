@@ -270,6 +270,10 @@ export class MotionEngine {
 
   /** Release all shape constraints */
   releaseShape() {
+    for (const id of this._shapeChars) {           // 离开流动 → 恢复全亮
+      const c = this.characters.get(id);
+      if (c) c.flowFade = 1;
+    }
     this._shapeChars.clear();
     this._shapeMask = null;
     this._shapeDragBaseMask = null;
@@ -396,16 +400,57 @@ export class MotionEngine {
     const path = this._flowPaths[o.p];
     const L = path.cells.length;
     if (path.loop) {
-      o.i = (o.i + 1) % L;
+      o.i = (o.i + 1) % L;               // 闭环：首尾相连绕圈
     } else {
-      let ni = o.i + path.dir;
-      if (ni < 0 || ni >= L) {        // reached an end → reverse this笔画 (往返)
-        path.dir *= -1;
-        ni = Math.max(0, Math.min(L - 1, o.i + path.dir));
-      }
-      o.i = ni;
+      // 开放笔画 = 单向传送带：一路推进到尾端；到尾端后停在尾端（已淡出、不可见），
+      // 由 _recycleFlowConveyor 在首端有空位时把它"传送"回首端（淡入）→ 持续单向流动，
+      // 尾端淡出腾出的空格向首端传播 → 即使细笔画也人人都在动、不死锁。
+      o.i = Math.min(L - 1, o.i + 1);
     }
     this._setFlowTarget(charId);
+  }
+
+  /**
+   * 开放笔画传送带回收：到尾端且已停在尾格的里字，若首格空出，则"传送"回首格
+   * （此刻它已淡出不可见 → 无突兀跳变）。每帧网格重建后调用，故占用判定准确。
+   * 同时为所有流动里字按沿线进度计算淡入/淡出因子 flowFade（首/尾几格渐隐）。
+   * @private
+   */
+  _recycleFlowConveyor() {
+    if (!this._flowPaths) return;
+    for (const [id, o] of this._flowOf) {
+      const path = this._flowPaths[o.p];
+      if (!path) continue;
+      const char = this.characters.get(id);
+      if (!char) continue;
+      const L = path.cells.length;
+      // 渐隐格数随笔画长度自适应：短笔画少渐隐（否则整条发暗），长笔画首/尾各 2 格。
+      const FADE = Math.max(1, Math.min(2, Math.floor(L / 4)));
+
+      if (!path.loop && L > 1) {
+        const tail = path.cells[L - 1];
+        if (o.i === L - 1 && char.gridX === tail.x && char.gridY === tail.y) {
+          const head = path.cells[0];
+          if (!this.grid.isOccupied(head.x, head.y)) {
+            this.grid.vacate(char.gridX, char.gridY);
+            char.gridX = head.x; char.gridY = head.y;
+            char.prevGridX = head.x; char.prevGridY = head.y;
+            this.grid.occupy(id, head.x, head.y);
+            o.i = 0;
+            this._setFlowTarget(id);
+          }
+        }
+      }
+
+      // 淡入/淡出因子：闭环或极短笔画恒亮；开放笔画首/尾 FADE 格内 0→1→…→0。
+      if (path.loop || L <= 3) {
+        char.flowFade = 1;
+      } else {
+        const fin = Math.min(1, o.i / FADE);
+        const fout = Math.min(1, (L - 1 - o.i) / FADE);
+        char.flowFade = Math.min(fin, fout);
+      }
+    }
   }
 
   // ── Orbit（拖动环绕）—— 显示层驱动，绕开 PIBT ───────────────────
@@ -663,6 +708,9 @@ export class MotionEngine {
     for (const char of chars) {
       this.grid.occupy(char.id, char.gridX, char.gridY);
     }
+
+    // 开放笔画传送带回收 + 淡入淡出因子（网格已重建 → 占用判定准确）。
+    this._recycleFlowConveyor();
 
     // During drag, keep shape characters alive inside the shifted mask.
     // Flow self-drives via flow indices — skip the wander block.

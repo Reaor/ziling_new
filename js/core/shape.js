@@ -337,39 +337,11 @@ export class ShapeSystem {
     const skel = this._thinZS(solid, cols, rows);
     let lines = this._traceSkeleton(skel, cols, rows);
     if (lines.length === 0) lines = [{ line: this._nnChain(solid), loop: false }];
+    // 不再插桥接格（那会把尖角补成方块、笔画臃肿）。保留 1 格宽中心线（含对角步），
+    // 尖角保持锐利；流动时由 PIBT 以横纵两步走过对角，瞬时经过、不破坏静态字形。
     return lines
       .filter(l => l.line.length >= 1)
-      .map(l => ({ cells: this._bridge4(l.line, l.loop), loop: l.loop }));
-  }
-
-  /**
-   * Insert orthogonal bridge cells for diagonal steps so the path is 4-connected
-   * (里字只走上下左右 → 流动 target 永远是相邻格、顺畅不卡）。Dedupe consecutive.
-   * @private
-   */
-  _bridge4(line, loop) {
-    const out = [];
-    const pushCell = (x, y) => {
-      const last = out[out.length - 1];
-      if (last && last.x === x && last.y === y) return;
-      out.push({ x, y });
-    };
-    for (let i = 0; i < line.length; i++) {
-      const c = line[i];
-      const last = out[out.length - 1];
-      if (last) {
-        const dx = c.x - last.x, dy = c.y - last.y;
-        if (Math.abs(dx) === 1 && Math.abs(dy) === 1) pushCell(last.x + dx, last.y); // bridge
-      }
-      pushCell(c.x, c.y);
-    }
-    // close the ring 4-connected too
-    if (loop && out.length > 2) {
-      const a = out[out.length - 1], b = out[0];
-      const dx = b.x - a.x, dy = b.y - a.y;
-      if (Math.abs(dx) === 1 && Math.abs(dy) === 1) pushCell(a.x + dx, a.y);
-    }
-    return out;
+      .map(l => ({ cells: l.line, loop: l.loop }));
   }
 
   /** Zhang-Suen thinning → Set of skeleton cell keys (y*cols+x). @private */
