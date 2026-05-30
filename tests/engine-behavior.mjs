@@ -780,8 +780,30 @@ function testMaskToPathsSplitsComponentsAndCoversCells() {
   }
 }
 
+// Regression: 字形 → 骨架细笔画. A solid thick bar thins to a ~1-wide centre line
+// whose path is 4-connected (so flow targets are always adjacent → smooth).
+function testGlyphToPathsThinsToFourConnectedStrokes() {
+  const shapes = new ShapeSystem();
+  const cols = 24, rows = 43;
+  const solid = [];
+  for (let x = 4; x < 18; x++) for (let y = 9; y < 13; y++) solid.push({ x, y }); // 14×4 bar
+  const paths = shapes._glyphToPaths(solid, cols, rows);
+
+  assert.ok(paths.length >= 1, 'bar yields at least one stroke path');
+  const main = paths.reduce((a, b) => (b.cells.length > a.cells.length ? b : a));
+  // skeleton centre line is far thinner than the solid (≈ length, not area)
+  assert.ok(main.cells.length <= 20, `centre line is thin, got ${main.cells.length}`);
+  assert.ok(main.cells.length >= 8, `centre line spans the bar, got ${main.cells.length}`);
+  // every consecutive pair is 4-adjacent (bridged), so flow never targets a diagonal
+  for (let i = 1; i < main.cells.length; i++) {
+    const a = main.cells[i - 1], b = main.cells[i];
+    assert.equal(Math.abs(a.x - b.x) + Math.abs(a.y - b.y), 1, 'path is 4-connected');
+  }
+}
+
 await testDoubleTapUsesGridCoordinates();
 await testSingleTapFiresImmediately();
+testGlyphToPathsThinsToFourConnectedStrokes();
 testMaskToPathsSplitsComponentsAndCoversCells();
 testFlowStreamsAlongPathStayingOnTrack();
 testOpenStrokePingPongFlowKeepsMoving();

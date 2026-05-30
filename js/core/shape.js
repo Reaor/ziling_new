@@ -91,9 +91,9 @@ export class ShapeSystem {
    */
   sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 84) {
     const text = EMOJI_TEMPLATES[emojiKey] ? emojiKey : '^_^';
-    // 颜文字重在辨形：strict 紧约束 + **密集实心**填满字形 → 轮廓清爽稳定。
-    // 正常字重、不描边、中等阈值：眼/嘴笔画分明又不臃肿。
-    const mask = this._rasterToCells(gridCols, gridRows, 0.16, (ctx, W, H) => {
+    // 颜文字 = 骨架细笔画：渲染实心字形 → 细化成 1 格宽中心线 → 追踪成笔画路径。
+    // 眼/嘴各是一条细线，里字沿线流动（匀布、不在拐角堆积、细处也不静止）。
+    const solid = this._rasterToCells(gridCols, gridRows, 0.16, (ctx, W, H) => {
       const fs = this._fitFont(ctx, text, W * 0.90, H * 0.54);
       ctx.font = `${fs}px ${FONT_STACK}`;
       ctx.textAlign = 'center';
@@ -101,12 +101,10 @@ export class ShapeSystem {
       ctx.fillStyle = '#ffffff';
       ctx.fillText(text, W / 2, H / 2);
     });
-
-    this.currentMask = mask;
+    const paths = this._glyphToPaths(solid, gridCols, gridRows);
     this.currentShape = emojiKey;
-    this.constraintType = 'strict';
-    // strict：里字密集定形、紧约束就近微动，轮廓清晰不糊。
-    return { mask, constraint: 'strict' };
+    this.constraintType = 'flow';
+    return { paths, constraint: 'flow' };
   }
 
   /* ----------------------------------------------------------
@@ -124,21 +122,19 @@ export class ShapeSystem {
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
   sampleMegachar(char, gridCols, gridRows, maxChars = 140, direction = 'horizontal') {
-    // 巨字走 B：strict 紧约束 + 密集填满字形（不简化内容）。加粗+描边取样让笔画
-    // 连贯；实心格数封顶到 ~210（FPS 均匀降采样）→ 190 里字能 ~90% 填满、轮廓清爽
-    // 不发虚（否则字太大、格子填不满会一片稀疏）。
-    const mask = this._rasterToMask(gridCols, gridRows, 210, 0.085, (ctx, W, H) => {
+    // 巨字 = 骨架细笔画（用户建议：一横只需一排字）。渲染加粗实心字形保证笔画连贯，
+    // 再细化成 1 格宽中心线、追踪成各笔画路径，里字沿线流动。字少→不挤、不卡、辨形清。
+    const solid = this._rasterToCells(gridCols, gridRows, 0.085, (ctx, W, H) => {
       const fs = this._fitFont(ctx, char, W * 0.96, H * 0.96);
       this._drawTextMask(ctx, char, W / 2, H / 2, fs, {
         weight: 800,
         strokeWidth: Math.max(SS * 0.5, fs * 0.024),
       });
     });
-
-    this.currentMask = mask;
+    const paths = this._glyphToPaths(solid, gridCols, gridRows);
     this.currentShape = char;
-    this.constraintType = 'strict';
-    return { mask, constraint: 'strict' };
+    this.constraintType = 'flow';
+    return { paths, constraint: 'flow' };
   }
 
   /* ----------------------------------------------------------
@@ -324,6 +320,141 @@ export class ShapeSystem {
       cur = best;
     }
     return chain;
+  }
+
+  /* ----------------------------------------------------------
+   *  字形 → 骨架细笔画路径（细化 + 追踪 + 4连通桥接）
+   * ---------------------------------------------------------- */
+
+  /**
+   * 把实心字形细化成 1 格宽的骨架中心线，追踪成若干有序笔画路径（开放/闭环），
+   * 每条笔画 = 一排里字沿线流动。里字少、笔画清晰、不挤、协调流动。纯函数可测。
+   * @param {Array<{x,y}>} solid @param {number} cols @param {number} rows
+   * @returns {Array<{cells:Array<{x,y}>, loop:boolean}>}
+   */
+  _glyphToPaths(solid, cols, rows) {
+    if (!solid || solid.length === 0) return [];
+    const skel = this._thinZS(solid, cols, rows);
+    let lines = this._traceSkeleton(skel, cols, rows);
+    if (lines.length === 0) lines = [{ line: this._nnChain(solid), loop: false }];
+    return lines
+      .filter(l => l.line.length >= 1)
+      .map(l => ({ cells: this._bridge4(l.line, l.loop), loop: l.loop }));
+  }
+
+  /**
+   * Insert orthogonal bridge cells for diagonal steps so the path is 4-connected
+   * (里字只走上下左右 → 流动 target 永远是相邻格、顺畅不卡）。Dedupe consecutive.
+   * @private
+   */
+  _bridge4(line, loop) {
+    const out = [];
+    const pushCell = (x, y) => {
+      const last = out[out.length - 1];
+      if (last && last.x === x && last.y === y) return;
+      out.push({ x, y });
+    };
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      const last = out[out.length - 1];
+      if (last) {
+        const dx = c.x - last.x, dy = c.y - last.y;
+        if (Math.abs(dx) === 1 && Math.abs(dy) === 1) pushCell(last.x + dx, last.y); // bridge
+      }
+      pushCell(c.x, c.y);
+    }
+    // close the ring 4-connected too
+    if (loop && out.length > 2) {
+      const a = out[out.length - 1], b = out[0];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      if (Math.abs(dx) === 1 && Math.abs(dy) === 1) pushCell(a.x + dx, a.y);
+    }
+    return out;
+  }
+
+  /** Zhang-Suen thinning → Set of skeleton cell keys (y*cols+x). @private */
+  _thinZS(solid, cols, rows) {
+    const on = new Set(solid.map(c => c.y * cols + c.x));
+    const at = (x, y) => (x >= 0 && y >= 0 && x < cols && y < rows && on.has(y * cols + x)) ? 1 : 0;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (let step = 0; step < 2; step++) {
+        const rem = [];
+        for (const k of on) {
+          const x = k % cols, y = (k - x) / cols;
+          const p2 = at(x, y - 1), p3 = at(x + 1, y - 1), p4 = at(x + 1, y), p5 = at(x + 1, y + 1),
+                p6 = at(x, y + 1), p7 = at(x - 1, y + 1), p8 = at(x - 1, y), p9 = at(x - 1, y - 1);
+          const B = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+          if (B < 2 || B > 6) continue;
+          const seq = [p2, p3, p4, p5, p6, p7, p8, p9, p2];
+          let A = 0;
+          for (let i = 0; i < 8; i++) if (seq[i] === 0 && seq[i + 1] === 1) A++;
+          if (A !== 1) continue;
+          if (step === 0) { if (p2 && p4 && p6) continue; if (p4 && p6 && p8) continue; }
+          else { if (p2 && p4 && p8) continue; if (p2 && p6 && p8) continue; }
+          rem.push(k);
+        }
+        if (rem.length) { changed = true; for (const k of rem) on.delete(k); }
+      }
+    }
+    return on;
+  }
+
+  /**
+   * Trace a 1-px skeleton into polylines: walk edges between nodes (degree≠2);
+   * leftover degree-2 rings become closed loops; isolated dots become 1-cell paths.
+   * @private @returns {Array<{line:Array<{x,y}>, loop:boolean}>}
+   */
+  _traceSkeleton(on, cols, rows) {
+    const DIRS8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+    const nbrs = (k) => {
+      const x = k % cols, y = (k - x) / cols;
+      const r = [];
+      for (const [dx, dy] of DIRS8) {
+        const nx = x + dx, ny = y + dy;
+        if (nx >= 0 && ny >= 0 && nx < cols && ny < rows && on.has(ny * cols + nx)) r.push(ny * cols + nx);
+      }
+      return r;
+    };
+    const deg = (k) => nbrs(k).length;
+    const toXY = (k) => ({ x: k % cols, y: (k - (k % cols)) / cols });
+    const eKey = (a, b) => a < b ? a + '_' + b : b + '_' + a;
+    const usedEdge = new Set();
+    const paths = [];
+
+    const walk = (start, first) => {
+      const line = [toXY(start)];
+      let prev = start, cur = first;
+      usedEdge.add(eKey(start, first));
+      while (true) {
+        line.push(toXY(cur));
+        if (deg(cur) !== 2) break;
+        const next = nbrs(cur).find(n => n !== prev && !usedEdge.has(eKey(cur, n)));
+        if (next === undefined) break;
+        usedEdge.add(eKey(cur, next));
+        prev = cur; cur = next;
+      }
+      return line;
+    };
+
+    for (const k of on) {
+      if (deg(k) === 2) continue;
+      for (const n of nbrs(k)) {
+        if (usedEdge.has(eKey(k, n))) continue;
+        paths.push({ line: walk(k, n), loop: false });
+      }
+    }
+    for (const k of on) {
+      if (deg(k) !== 2) continue;
+      const n = nbrs(k).find(nn => !usedEdge.has(eKey(k, nn)));
+      if (n === undefined) continue;
+      paths.push({ line: walk(k, n), loop: true });
+    }
+    for (const k of on) {
+      if (deg(k) === 0) paths.push({ line: [toXY(k)], loop: false });
+    }
+    return paths;
   }
 
   /* ----------------------------------------------------------
