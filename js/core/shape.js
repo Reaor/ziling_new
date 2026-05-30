@@ -25,7 +25,7 @@
 
 const FONT_STACK = '"PingFang SC", "Microsoft YaHei", "Heiti SC", "Noto Sans CJK SC", sans-serif';
 const BOLD_FONT_STACK = '"PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Heiti SC", sans-serif';
-const SS = 6; // supersample factor per grid cell
+const SS = 8; // supersample factor per grid cell（提采样分辨率→边缘更干净、辨形更好）
 
 /* ================================================================
  *  SHAPE TEMPLATE DATA
@@ -91,10 +91,10 @@ export class ShapeSystem {
    */
   sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 84) {
     const text = EMOJI_TEMPLATES[emojiKey] ? emojiKey : '^_^';
-    // 颜文字重在辨形：眼/嘴要分明、笔画要**细**（之前加粗+描边导致糊成一团）。
-    // 用正常字重、不描边、阈值偏高 → 只点亮笔画核心，眼嘴清爽可辨。
-    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.18, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, text, W * 0.90, H * 0.52);
+    // 颜文字重在辨形：strict 紧约束 + **密集实心**填满字形 → 轮廓清爽稳定。
+    // 正常字重、不描边、中等阈值：眼/嘴笔画分明又不臃肿。
+    const mask = this._rasterToCells(gridCols, gridRows, 0.16, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, text, W * 0.90, H * 0.54);
       ctx.font = `${fs}px ${FONT_STACK}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -104,9 +104,9 @@ export class ShapeSystem {
 
     this.currentMask = mask;
     this.currentShape = emojiKey;
-    this.constraintType = 'flow';
-    // 拆成每条笔画的有序路径（往返流动），让全体里字实心填满字形并持续运动。
-    return { mask, paths: this._maskToPaths(mask, gridCols), constraint: 'flow' };
+    this.constraintType = 'strict';
+    // strict：里字密集定形、紧约束就近微动，轮廓清晰不糊。
+    return { mask, constraint: 'strict' };
   }
 
   /* ----------------------------------------------------------
@@ -124,19 +124,21 @@ export class ShapeSystem {
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
   sampleMegachar(char, gridCols, gridRows, maxChars = 140, direction = 'horizontal') {
-    const mask = this._rasterToMask(gridCols, gridRows, maxChars, 0.09, (ctx, W, H) => {
-      // 加粗 + 描边取样，让笔画更连贯、更易辨形（视觉层仍渲染普通里字）。
-      const fs = this._fitFont(ctx, char, W * 0.92, H * 0.92);
+    // 巨字走 B：strict 紧约束 + 密集填满字形（不简化内容）。加粗+描边取样让笔画
+    // 连贯；实心格数封顶到 ~210（FPS 均匀降采样）→ 190 里字能 ~90% 填满、轮廓清爽
+    // 不发虚（否则字太大、格子填不满会一片稀疏）。
+    const mask = this._rasterToMask(gridCols, gridRows, 210, 0.085, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, char, W * 0.96, H * 0.96);
       this._drawTextMask(ctx, char, W / 2, H / 2, fs, {
         weight: 800,
-        strokeWidth: Math.max(SS * 0.65, fs * 0.03),
+        strokeWidth: Math.max(SS * 0.5, fs * 0.024),
       });
     });
 
     this.currentMask = mask;
     this.currentShape = char;
-    this.constraintType = 'flow';
-    return { mask, paths: this._maskToPaths(mask, gridCols), constraint: 'flow' };
+    this.constraintType = 'strict';
+    return { mask, constraint: 'strict' };
   }
 
   /* ----------------------------------------------------------
@@ -383,6 +385,16 @@ export class ShapeSystem {
    * @returns {Array<{x:number,y:number}>}
    */
   _rasterToMask(cols, rows, maxChars, threshold, drawFn) {
+    return this._sparsify(this._rasterToCells(cols, rows, threshold, drawFn), maxChars);
+  }
+
+  /**
+   * Rasterise `drawFn` and return ALL lit grid cells (solid glyph, no sparsify).
+   * Used for strict 密集定形 (颜文字/巨字) where里字 should fill the glyph cleanly.
+   * @private
+   * @returns {Array<{x:number,y:number}>}
+   */
+  _rasterToCells(cols, rows, threshold, drawFn) {
     const W = cols * SS;
     const H = rows * SS;
     const off = new OffscreenCanvas(W, H);
@@ -409,7 +421,7 @@ export class ShapeSystem {
         if (on >= need) cells.push({ x: gx, y: gy });
       }
     }
-    return this._sparsify(cells, maxChars);
+    return cells;
   }
 
   /**

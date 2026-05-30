@@ -35,14 +35,18 @@ const SPIRAL_STAGGER_MS = 70;  // 同臂相邻里字的出发间隔（形成"一
 const SPIRAL_TURNS = 0.7;      // 螺旋缠绕圈数
 const INITIAL_CHARS = 56;      // 首屏播种数（之后随形状自适应增减）
 const MIN_CHARS = 28;
-const MAX_CHARS = 156;
+const MAX_CHARS = 190;   // 巨字密集定形需要较多里字才能填满字形（B 方案）
 // 流动呈现：里字沿路径流动，按形态分别控制填充率。
 //  - 闭环曲线(心形/花)：近乎全覆盖，线条才连续不断（用户反馈"曲线没被全覆盖"）。
 //  - 开放笔画(颜文字/巨字)：留更多空位 → 传送带推得动、更灵动（不要静止）。
 const FLOW_FILL_LOOP = 0.95;
 const FLOW_FILL_STROKE = 0.70;
-// 微动：点击时随点击反应触发的一次性"轻摆"脉冲（全体一起做、随后衰减），
-// 不常驻（常驻会很乱）。MICRO_AMP=幅度(px)，MICRO_DECAY_MS=衰减时长。
+// strict（颜文字/巨字）：密集定形、紧约束就近微动。填得很满 → 轮廓清爽稳定、易辨形
+// （留极少空位让里字轻微错动、配合微动呼吸即有生命感，不靠大幅游走）。
+const STRICT_FILL = 0.90;
+// 微动：MICRO_BREATH=常驻"呼吸"幅度(px，亚像素，给密集定形的形状生命感)；
+// MICRO_AMP=点击脉冲幅度(px，全体一起轻摆后衰减)；MICRO_DECAY_MS=脉冲衰减时长。
+const MICRO_BREATH = 1.1;
 const MICRO_AMP = 5.5;
 const MICRO_DECAY_MS = 700;
 const BREAK_PROB = 0.3;        // 点击概率打破轮廓（里字散成自由云团再归位）
@@ -56,7 +60,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const gridCols = Math.floor(cssWidth / CELL_SIZE);
   const gridRows = Math.floor(cssHeight / CELL_SIZE);
   const grid = new Grid(gridCols, gridRows);
-  const pool = new CharacterPool(200);
+  const pool = new CharacterPool(260);
   const motion = new MotionEngine(grid, CELL_SIZE, 0);
   motion.tickDuration = TICK_MS;
   const shapes = new ShapeSystem();
@@ -87,7 +91,9 @@ document.addEventListener('DOMContentLoaded', () => {
   ];
   let shapeIndex = 0;
   let shapeActive = false;
-  let currentPaths = null; // 当前形状的路径（散开/打断/松手后据此归位）
+  let currentPaths = null;      // flow（曲线）的有序路径；strict 时为 null
+  let currentCells = [];        // 当前形状占用的格子（strict 掩码 / flow 路径格的并集）
+  let currentConstraint = 'flow'; // 'strict'（颜文字/巨字）| 'flow'（曲线）
 
   // ── 里字自适应 = 螺旋淡入/淡出（显示层动画，绕开 PIBT，收束 L4）──────────
   // 新增/消失的里字沿 SPIRAL_ARMS 条螺旋臂"一个接一个"整齐排列：向内运动=淡入
@@ -197,8 +203,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function finalizeSpiralIn(a) {
     const cgx = Math.max(0, Math.min(gridCols - 1, Math.round(a.char.displayX / CELL_SIZE)));
     const cgy = Math.max(0, Math.min(gridRows - 1, Math.round(a.char.displayY / CELL_SIZE)));
-    const shapeCells = currentPaths ? currentPaths.flatMap(p => p.cells) : a.mask;
-    const cell = closestFreeMaskCell(a.mask, cgx, cgy) || closestFreeMaskCell(shapeCells, cgx, cgy);
+    const cell = closestFreeMaskCell(a.mask, cgx, cgy) || closestFreeMaskCell(currentCells, cgx, cgy);
     const gx = cell ? cell[0] : cgx;
     const gy = cell ? cell[1] : cgy;
     a.char.gridX = gx; a.char.gridY = gy; a.char.prevGridX = gx; a.char.prevGridY = gy;
@@ -207,58 +212,72 @@ document.addEventListener('DOMContentLoaded', () => {
     reformPending = true;
   }
 
-  // 用当前形状的路径把在册里字约束成"流动呈现"。散开/打断/松手后归位都用它。
+  // 把在册里字约束成当前形状：strict（颜文字/巨字）= 密集定形紧约束；flow（曲线）=
+  // 沿闭环流动。散开/打断/松手归位、螺旋增减后并入都用它。
   function formCurrent() {
-    if (!currentPaths) return;
     motion.releaseShape();
-    motion.setFlowPaths(currentPaths, aliveIds());
+    if (currentConstraint === 'strict') {
+      motion.setShapeMask(currentCells, aliveIds(), 'strict');
+    } else if (currentPaths) {
+      motion.setFlowPaths(currentPaths, aliveIds());
+    }
   }
 
   function applyShape(index) {
     shapeIndex = ((index % SHAPES.length) + SHAPES.length) % SHAPES.length;
     const def = SHAPES[shapeIndex];
     const sampled = def.make(def.cells);
-    const paths = sampled.paths;
-    if (!paths || paths.length === 0) return;
-    currentPaths = paths;
     shapeActive = true;
-    // 里字数随形状自适应：闭环曲线近乎全覆盖、开放笔画留空位更灵动（收束 L33）。
     let target = 0;
-    for (const p of paths) target += Math.round(p.cells.length * (p.loop ? FLOW_FILL_LOOP : FLOW_FILL_STROKE));
+    if (sampled.paths && sampled.paths.length > 0) {
+      // 曲线 → flow 闭环流动；闭环近乎全覆盖、开放笔画留空位更灵动。
+      currentConstraint = 'flow';
+      currentPaths = sampled.paths;
+      currentCells = sampled.paths.flatMap(p => p.cells);
+      for (const p of sampled.paths) target += Math.round(p.cells.length * (p.loop ? FLOW_FILL_LOOP : FLOW_FILL_STROKE));
+    } else if (sampled.mask && sampled.mask.length > 0) {
+      // 颜文字/巨字 → strict 密集定形紧约束（轮廓清爽稳定）。
+      currentConstraint = 'strict';
+      currentPaths = null;
+      currentCells = sampled.mask;
+      target = Math.round(sampled.mask.length * STRICT_FILL);
+    } else {
+      return;
+    }
     target = Math.max(MIN_CHARS, Math.min(MAX_CHARS, target));
-    adaptCharCount(target, paths.flatMap(p => p.cells));
+    // 里字数随形状自适应（螺旋淡入/淡出）。
+    adaptCharCount(target, currentCells);
     formCurrent();
-    console.log(`Shape → ${def.name} (${paths.length} paths, ${total} cells, ${aliveIds().length}里字)`);
+    console.log(`Shape → ${def.name} (${currentConstraint}, ${currentCells.length} cells, ${aliveIds().length}里字)`);
   }
 
   function releaseShape() {
     shapeActive = false;
     currentPaths = null;
+    currentCells = [];
     motion.releaseShape();
     console.log('Shape released → free wander');
   }
 
   // Reconstrain里字 to the current shape (used after scatter / break restore).
   function reformShape() {
-    if (!shapeActive || !currentPaths) return;
+    if (!shapeActive || currentCells.length === 0) return;
     formCurrent();
   }
 
-  // 松手后在落点处还原形状：把所有路径整体平移到 (cx,cy) 附近再成形。
+  // 松手后在落点处还原形状：把形状整体平移到 (cx,cy) 附近再成形。
   function reformAt(cx, cy) {
-    if (!shapeActive || !currentPaths) return;
-    const all = currentPaths.flatMap(p => p.cells);
+    if (!shapeActive || currentCells.length === 0) return;
     let ax = 0, ay = 0;
-    for (const c of all) { ax += c.x; ay += c.y; }
-    ax = Math.round(ax / all.length); ay = Math.round(ay / all.length);
+    for (const c of currentCells) { ax += c.x; ay += c.y; }
+    ax = Math.round(ax / currentCells.length); ay = Math.round(ay / currentCells.length);
     let sx = cx - ax, sy = cy - ay;
-    const xs = all.map(c => c.x), ys = all.map(c => c.y);
+    const xs = currentCells.map(c => c.x), ys = currentCells.map(c => c.y);
     sx = Math.max(-Math.min(...xs), Math.min(gridCols - 1 - Math.max(...xs), sx));
     sy = Math.max(-Math.min(...ys), Math.min(gridRows - 1 - Math.max(...ys), sy));
-    currentPaths = currentPaths.map(p => ({
-      loop: p.loop,
-      cells: p.cells.map(c => ({ x: c.x + sx, y: c.y + sy })),
-    }));
+    const shift = c => ({ x: c.x + sx, y: c.y + sy });
+    currentCells = currentCells.map(shift);
+    if (currentPaths) currentPaths = currentPaths.map(p => ({ loop: p.loop, cells: p.cells.map(shift) }));
     formCurrent();
   }
 
@@ -375,14 +394,17 @@ document.addEventListener('DOMContentLoaded', () => {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#e0e0e0';
-    // 微动：点击触发的一次性"轻摆"脉冲（microEnv 由 1 衰减到 0），全体里字一起
-    // 抖一下作为点击反应；平时为 0（不常驻，避免画面乱）。拖动时不叠加。
+    // 微动 = 常驻"呼吸"（亚像素轻摆，给密集定形的形状以生命感、不破坏轮廓）
+    //      + 点击触发的一次性"轻摆"脉冲（microEnv 由 1 衰减）。拖动时都不叠加。
     const tSec = now / 1000;
-    const amp = motion.isOrbiting() ? 0 : microEnv * MICRO_AMP;
+    const orbiting = motion.isOrbiting();
+    const breath = orbiting ? 0 : MICRO_BREATH;
+    const pulse = orbiting ? 0 : microEnv * MICRO_AMP;
+    const amp = breath + pulse;
     for (const char of pool.getAll()) {
       if (char.alpha > 0.01) {
-        const mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
-        const my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
+        const mx = amp ? Math.sin(tSec * 2.6 + char.id * 1.3) * amp : 0;
+        const my = amp ? Math.cos(tSec * 2.2 + char.id * 2.1) * amp : 0;
         ctx.globalAlpha = char.alpha;
         ctx.fillText(char.char,
           char.displayX + CELL_SIZE / 2 + mx,
