@@ -800,6 +800,34 @@ function testGlyphToPathsThinsToOneWideStrokes() {
   }
 }
 
+// Regression (CRITICAL): 字形 → 骨架笔画路径必须 4 连通（上下左右相邻）。中心线本身
+// 含对角步（撇/捺/尖角），但里字只走 4 方向且被限制在掩码内 —— 对角步若不补正交桥接，
+// 里字到不了下一格 → 流动卡死、卡住的里字 flowFade→0 隐形 → 表现为"笔画缺失/部分字
+// 静止/看不到流动"。本测试钉死：glyph 路径任意相邻两格曼哈顿距离恒为 1（杜绝该退化）。
+function testGlyphPathsAre4ConnectedForFlow() {
+  const shapes = new ShapeSystem();
+  // 斜向实心笔画（撇/捺）→ 细化出的中心线必为对角，最能暴露未桥接的退化。
+  const solid = [];
+  for (let i = 0; i < 16; i++) {
+    const x = 4 + i, y = 6 + i;
+    for (let dx = 0; dx < 3; dx++) for (let dy = 0; dy < 3; dy++) solid.push({ x: x + dx, y: y + dy });
+  }
+  const paths = shapes._glyphToPaths(solid, 30, 40);
+  assert.ok(paths.length >= 1, 'slanted bar yields at least one stroke path');
+  for (const p of paths) {
+    for (let i = 1; i < p.cells.length; i++) {
+      const a = p.cells[i - 1], b = p.cells[i];
+      const manhattan = Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+      assert.equal(manhattan, 1,
+        `glyph path must be 4-connected for flow, got step ${manhattan} at ${a.x},${a.y}->${b.x},${b.y}`);
+    }
+    if (p.loop && p.cells.length > 2) {
+      const a = p.cells[p.cells.length - 1], b = p.cells[0];
+      assert.equal(Math.abs(a.x - b.x) + Math.abs(a.y - b.y), 1, 'loop seam must be 4-connected too');
+    }
+  }
+}
+
 // Open-stroke flow = 单向传送带 + 尾端回收到首端：里字持续单向流动、人人都动、不重叠，
 // 且尾端 flowFade→0（淡出）、首端 flowFade→0（淡入）。
 function testOpenStrokeConveyorRecyclesAndKeepsEveryoneMoving() {
@@ -838,6 +866,7 @@ function testOpenStrokeConveyorRecyclesAndKeepsEveryoneMoving() {
 await testDoubleTapUsesGridCoordinates();
 await testSingleTapFiresImmediately();
 testGlyphToPathsThinsToOneWideStrokes();
+testGlyphPathsAre4ConnectedForFlow();
 testOpenStrokeConveyorRecyclesAndKeepsEveryoneMoving();
 testMaskToPathsSplitsComponentsAndCoversCells();
 testFlowStreamsAlongPathStayingOnTrack();
