@@ -218,12 +218,38 @@ export class MotionEngine {
     this._rebuildMaskSet();
     this._shapeConstraint = 'flowfill';
     this._shapeChars = new Set(charIds);
+
+    // 关键：把**不在掩码内**的里字"领进"字形 —— 给每个分派一个最近的、尚未被认领的
+    // 空掩码格作为入场目标（navigate in，不受掩码约束故能从外部走进来）。已在掩码内的
+    // 里字则无目标、直接循环流动。否则切换形状时上一形状遗留在外的里字会一直游荡、收束不紧。
+    const taken = new Set();
     for (const id of charIds) {
-      this._wanderTargets.delete(id);            // 无目标 → PIBT 持向流动
+      const c = this.characters.get(id);
+      if (c && this._inMask(c.gridX, c.gridY)) taken.add(c.gridY * 10000 + c.gridX);
+    }
+    for (const id of charIds) {
+      const c = this.characters.get(id);
+      this._stuckTicks.set(id, 0);
       const d = DIRS[(Math.random() * 4) | 0];
       this._currentDirs.set(id, { dx: d.dx, dy: d.dy });
       this._directionStreaks.set(id, (Math.random() * 8) | 0);
-      this._stuckTicks.set(id, 0);
+      if (!c || this._inMask(c.gridX, c.gridY)) {
+        this._wanderTargets.delete(id);          // 已在内 → 无目标循环流动
+        continue;
+      }
+      let best = null, bestD = Infinity;          // 在外 → 认领最近空掩码格作入场目标
+      for (const cell of mask) {
+        const k = cell.y * 10000 + cell.x;
+        if (taken.has(k)) continue;
+        const dd = Math.abs(cell.x - c.gridX) + Math.abs(cell.y - c.gridY);
+        if (dd < bestD) { bestD = dd; best = cell; }
+      }
+      if (best) {
+        taken.add(best.y * 10000 + best.x);
+        this._wanderTargets.set(id, { tx: best.x, ty: best.y });
+      } else {
+        this._wanderTargets.delete(id);
+      }
     }
   }
 
@@ -741,6 +767,11 @@ export class MotionEngine {
           if (this._shapeConstraint === 'flow' && this._flowOf.has(char.id)) {
             // 流动中被堵 → 跳到下一路径格绕过拥堵，保持推进不卡死。
             this._advanceFlowIndex(char.id);
+          } else if (this._shapeConstraint === 'flowfill' && this._inMask(char.gridX, char.gridY)) {
+            // 满填循环里被同伴堵住（密处/旋转环）→ 随机换一个方向重新尝试，避免静止。
+            const d = DIRS[(Math.random() * 4) | 0];
+            this._currentDirs.set(char.id, { dx: d.dx, dy: d.dy });
+            this._directionStreaks.set(char.id, 0);
           } else {
             // Force a new target — PIBT will naturally find a way out
             this._assignWanderTarget(char);
