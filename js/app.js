@@ -24,7 +24,7 @@ import { MotionEngine } from './core/motion.js';
 import { ShapeSystem } from './core/shape.js';
 import { GestureRecognizer } from './input/gestures.js';
 
-const CELL_SIZE = 14;          // 网格分辨率（16→14：字形更细腻、里字更多，里字仍可读）
+const CELL_SIZE = 13;          // 网格分辨率（越小字形越细腻、笔画越易分开；里字仍可读）
 const FONT_SIZE = 12;          // 里字字号（嵌入 app 仍清晰；与 CELL_SIZE 留出间距防贴字）
 const TICK_MS = 200;           // 常速 tick —— 匀速铁律（拖动期由引擎自行提速跟手）
 const SCATTER_RESTORE_MS = 2500;
@@ -35,7 +35,7 @@ const SPIRAL_STAGGER_MS = 70;  // 同臂相邻里字的出发间隔（形成"一
 const SPIRAL_TURNS = 0.7;      // 螺旋缠绕圈数
 const INITIAL_CHARS = 56;      // 首屏播种数（之后随形状自适应增减）
 const MIN_CHARS = 28;
-const MAX_CHARS = 230;   // 巨字密集定形需要较多里字才能填满字身、清晰辨形
+const MAX_CHARS = 320;   // 巨字密集定形需要较多里字才能填满字身、清晰辨形（复杂字如"爱"尤甚）
 // 流动呈现：里字沿路径流动，按形态分别控制填充率。
 //  - 闭环曲线(心形/花)：近乎全覆盖，线条才连续不断（用户反馈"曲线没被全覆盖"）。
 //  - 开放笔画(颜文字/巨字)：留更多空位 → 传送带推得动、更灵动（不要静止）。
@@ -43,9 +43,10 @@ const FLOW_FILL_LOOP = 0.95;
 // 骨架细笔画（颜文字/巨字）是 1 格宽中心线：开放笔画走"单向传送带+尾端淡出/首端淡入"，
 // 留约 1/4 空位让传送带顺畅流动、人人都动（细处也不静止）。闭环（曲线/眼睛 o）用 LOOP。
 const FLOW_FILL_STROKE = 0.78;
-// strict（颜文字/巨字）：密集定形 → 里字填满字身、轮廓清爽稳定、易辨形。留约 20%
+// strict（颜文字/巨字）：密集定形 → 里字填满字身、轮廓清爽稳定、易辨形。留约 10%
 // 空位让里字做华容道小幅滑动（动态呈现、有生命感），既不静止也不破坏字形。
-const STRICT_FILL = 0.80;
+// 0.90 是辨形（要填满）与灵动（要留缝隙滑动）的平衡点，密度低于 ~0.8 复杂字会发虚。
+const STRICT_FILL = 0.90;
 // 微动：MICRO_AMP=点击反应脉冲幅度(px，点击时全体轻摆一下后衰减)；DECAY=衰减时长。
 const MICRO_AMP = 5.5;
 const MICRO_DECAY_MS = 700;
@@ -60,7 +61,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const gridCols = Math.floor(cssWidth / CELL_SIZE);
   const gridRows = Math.floor(cssHeight / CELL_SIZE);
   const grid = new Grid(gridCols, gridRows);
-  const pool = new CharacterPool(260);
+  const pool = new CharacterPool(380);
   const motion = new MotionEngine(grid, CELL_SIZE, 0);
   motion.tickDuration = TICK_MS;
   const shapes = new ShapeSystem();
@@ -81,10 +82,10 @@ document.addEventListener('DOMContentLoaded', () => {
   //   - 曲线/数学曲线：单条闭环路径 → flow（里字首尾相连绕圈流动）。
   // `cells` 是该形状里字数上限的提示（越大越密、越清晰）。里字数随掩码格数自适应增减。
   const SHAPES = [
-    { name: '^_^',  cells: 120, make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
-    { name: '>_<',  cells: 120, make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
-    { name: '心',   cells: 230, make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
-    { name: '春',   cells: 230, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
+    { name: '^_^',  cells: 190, make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
+    { name: '>_<',  cells: 190, make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
+    { name: '心',   cells: 320, make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
+    { name: '春',   cells: 320, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
     { name: '爱心', cells: 80,  make: n => shapes.sampleCurveOrdered('heart', gridCols, gridRows, n) },
     { name: '四叶花', cells: 96, make: n => shapes.sampleCurveOrdered('rose', gridCols, gridRows, n) },
   ];

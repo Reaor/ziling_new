@@ -89,16 +89,16 @@ export class ShapeSystem {
    * @param {number} [maxChars=80]
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
-  sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 110) {
+  sampleEmoji(emojiKey, gridCols, gridRows, maxChars = 190) {
     const text = EMOJI_TEMPLATES[emojiKey] ? emojiKey : '^_^';
     // 颜文字 = 实心定形（不再细化骨架、不再逐笔淡入淡出 —— 那样画面发乱、难辨形）。
-    // 加粗描边渲染让眼/嘴笔画有 2 格宽的身段，按覆盖率点亮格子、均匀抽稀到 maxChars。
+    // 渲染得稍大、加粗描边让眼/嘴笔画有 2 格宽身段、按覆盖率点亮格子、均匀抽稀到 maxChars。
     // 里字在掩码内做小幅华容道滑动（strict）→ 形稳易辨、又始终在动（有生命感）。
-    const cells = this._rasterToCells(gridCols, gridRows, 0.3, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, text, W * 0.92, H * 0.50);
+    const cells = this._rasterToCells(gridCols, gridRows, 0.30, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, text, W * 0.92, H * 0.42);
       this._drawTextMask(ctx, text, W / 2, H / 2, fs, {
         weight: 800,
-        strokeWidth: Math.max(SS * 0.6, fs * 0.045),
+        strokeWidth: Math.max(SS * 0.6, fs * 0.05),
       });
     });
     const mask = this._sparsify(cells, maxChars);
@@ -122,13 +122,13 @@ export class ShapeSystem {
    *   multi-char 巨字 stacking; a single char always renders upright.
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
-  sampleMegachar(char, gridCols, gridRows, maxChars = 220, direction = 'horizontal') {
+  sampleMegachar(char, gridCols, gridRows, maxChars = 320, direction = 'horizontal') {
     // 巨字 = 实心定形：里字密集填满字身（不是细骨架）→ 即时辨形，且对任意汉字都稳健
     // （只需栅格化，不依赖脆弱的细化/追踪，适合运行时即时呈现 AI 给出的不同巨字）。
     // 加粗实心渲染保证笔画连贯，按覆盖率点亮格子、均匀抽稀到 maxChars。里字在掩码内做
     // 小幅华容道滑动（strict）→ 稳定可辨又始终在动，不用会让画面发乱的逐笔淡入淡出。
     const cells = this._rasterToCells(gridCols, gridRows, 0.45, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, char, W * 0.84, H * 0.84);
+      const fs = this._fitFont(ctx, char, W * 0.86, H * 0.86);
       this._drawTextMask(ctx, char, W / 2, H / 2, fs, {
         weight: 900,
         strokeWidth: Math.max(SS * 0.35, fs * 0.012),
