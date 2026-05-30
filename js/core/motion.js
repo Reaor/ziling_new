@@ -52,6 +52,9 @@ export class MotionEngine {
     // Stuck tracking
     this._stuckTicks = new Map();
 
+    // Reusable id→index map for PIBT (avoids O(N) findIndex each step)
+    this._idToIndex = new Map();
+
     // Interpolation stagger
     this._moveStartTimes = new Map();
 
@@ -62,6 +65,7 @@ export class MotionEngine {
     // 'loose'  → curves/flowers roam the whole mask freely
     // 'flow'   → 里字沿一组有序路径（笔画/曲线）流动：闭环绕圈、开放笔画往返
     this._shapeConstraint = 'loose';
+    this._shapeMaskSet = new Set();  // 掩码格子键集合 → O(1) 成员判定（替代 .some 线性扫描）
     this._shapeDragBaseMask = null;
     this._lastShapeDragShift = { col: 0, row: 0 };
 
@@ -88,7 +92,15 @@ export class MotionEngine {
 
   /** Public getter/setter bridging _shapeMask for external access */
   get shapeMask() { return this._shapeMask; }
-  set shapeMask(v) { this._shapeMask = v; }
+  set shapeMask(v) { this._shapeMask = v; this._rebuildMaskSet(); }
+
+  /** 重建 O(1) 掩码键集合（任何改写 _shapeMask 后都要调用，键编码同 grid.getCellKey）。*/
+  _rebuildMaskSet() {
+    const set = this._shapeMaskSet;
+    set.clear();
+    if (this._shapeMask) for (const c of this._shapeMask) set.add(c.y * 10000 + c.x);
+  }
+  _inMask(x, y) { return this._shapeMaskSet.has(y * 10000 + x); }
 
   // ── Public API ────────────────────────────────────────
 
@@ -186,6 +198,7 @@ export class MotionEngine {
     this._flowOf.clear();
     this._flowPaths = null;
     this._shapeMask = mask;
+    this._rebuildMaskSet();
     this._shapeConstraint = constraint;
     this._shapeChars = new Set(charIds);
     this._assignShapeTargets();
@@ -236,6 +249,7 @@ export class MotionEngine {
     }
 
     this._shapeMask = shifted;
+    this._rebuildMaskSet();
     this._lastShapeDragShift = { col: shiftCol, row: shiftRow };
 
     // 不再做"全体刚性槽位重排"（那会让里字像整体平移、彼此相对静止）。
@@ -276,6 +290,7 @@ export class MotionEngine {
     }
     this._shapeChars.clear();
     this._shapeMask = null;
+    this._shapeMaskSet.clear();
     this._shapeDragBaseMask = null;
     this._flowPaths = null;
     this._flowOf.clear();
@@ -330,6 +345,7 @@ export class MotionEngine {
       mask.push(c);
     }
     this._shapeMask = mask;
+    this._rebuildMaskSet();
 
     // allocate chars across paths ∝ length, each path keeping ≥1 gap, but with a
     // per-stroke floor so short strokes (颜文字的"嘴") aren't starved vs the eyes.
@@ -626,6 +642,11 @@ export class MotionEngine {
 
     const idx = (x, y) => y * cols + x;
 
+    // id → 数组下标映射（替代 PIBT 里 O(N) 的 chars.findIndex → 整体由 O(N²) 降到 O(N)）。
+    const idToIndex = this._idToIndex;
+    idToIndex.clear();
+    for (let i = 0; i < N; i++) idToIndex.set(chars[i].id, i);
+
     // Record current occupation
     for (let i = 0; i < N; i++) {
       this._occupiedNow[idx(chars[i].gridX, chars[i].gridY)] = chars[i].id;
@@ -637,7 +658,7 @@ export class MotionEngine {
 
     for (const i of order) {
       if (this._nextPos[i] === -1) {
-        this._funcPIBT(chars, i, cols, rows, idx);
+        this._funcPIBT(chars, i, cols, rows, idx, idToIndex);
       }
     }
 
@@ -733,13 +754,13 @@ export class MotionEngine {
     }
   }
 
-  _funcPIBT(chars, i, cols, rows, idx) {
+  _funcPIBT(chars, i, cols, rows, idx, idToIndex) {
     const char = chars[i];
     const grid = this.grid;
     const target = this._wanderTargets.get(char.id);
     const isShape = this._shapeChars.has(char.id);
-    const isInsideShape = isShape && this._shapeMask &&
-      this._shapeMask.some(c => c.x === char.gridX && c.y === char.gridY);
+    const isInsideShape = isShape && this._shapeMaskSet.size > 0 &&
+      this._inMask(char.gridX, char.gridY);
 
     // Candidates: [stay] + [4 neighbors] — only unoccupied
     const cands = [{ x: char.gridX, y: char.gridY, stay: true }];
@@ -747,13 +768,10 @@ export class MotionEngine {
       const nx = char.gridX + d.dx;
       const ny = char.gridY + d.dy;
       if (nx < 0 || nx >= cols || ny < 0 || ny >= rows) continue;
-      
-      // Shape constraint: only move within mask
-      if (isInsideShape) {
-        const inMask = this._shapeMask.some(c => c.x === nx && c.y === ny);
-        if (!inMask) continue;
-      }
-      
+
+      // Shape constraint: only move within mask (O(1) set lookup, 不再线性扫描掩码)
+      if (isInsideShape && !this._inMask(nx, ny)) continue;
+
       cands.push({ x: nx, y: ny, stay: false, dx: d.dx, dy: d.dy });
     }
 
@@ -762,14 +780,24 @@ export class MotionEngine {
     const streak = this._directionStreaks.get(char.id) || 0;
     const stuck = this._stuckTicks.get(char.id) || 0;
 
-    // Compute repulsion score for each candidate: avoid nearby characters
+    // Repulsion per candidate by scanning ONLY the local grid neighbourhood
+    // (manhattan<4 diamond ≈ 25 cells) via grid.getCharId, instead of all N里字 →
+    // O(1) not O(N)（去掉随字数平方增长的开销，这是卡顿主因之一）。
     for (const c of cands) {
-      c.repulsion = 0;
-      for (const other of chars) {
-        if (other.id === char.id) continue;
-        const dist = Math.abs(c.x - other.gridX) + Math.abs(c.y - other.gridY);
-        if (dist < 4) c.repulsion -= (4 - dist) * 3; // Strong penalty for being close
+      let rep = 0;
+      for (let oy = -3; oy <= 3; oy++) {
+        const ny = c.y + oy;
+        if (ny < 0 || ny >= rows) continue;
+        const budget = 3 - Math.abs(oy);
+        for (let ox = -budget; ox <= budget; ox++) {
+          if (ox === 0 && oy === 0) continue;
+          const nx = c.x + ox;
+          if (nx < 0 || nx >= cols) continue;
+          const occ = grid.getCharId(nx, ny);
+          if (occ !== -1 && occ !== char.id) rep -= (4 - (Math.abs(ox) + Math.abs(oy))) * 3;
+        }
       }
+      c.repulsion = rep;
     }
 
     // Sort priority depends on whether the character is pursuing a target.
@@ -830,17 +858,17 @@ export class MotionEngine {
 
       const occNow = this._occupiedNow[ci];
       if (occNow !== -1) {
-        const oj = chars.findIndex(ch => ch.id === occNow);
-        if (oj !== -1 && this._nextPos[oj] === idx(char.gridX, char.gridY)) continue;
+        const oj = idToIndex.get(occNow);
+        if (oj !== undefined && this._nextPos[oj] === idx(char.gridX, char.gridY)) continue;
       }
 
       this._nextPos[i] = ci;
       this._occupiedNxt[ci] = char.id;
 
       if (occNow !== -1 && occNow !== char.id) {
-        const oj = chars.findIndex(ch => ch.id === occNow);
-        if (oj !== -1 && this._nextPos[oj] === -1) {
-          if (!this._funcPIBT(chars, oj, cols, rows, idx)) {
+        const oj = idToIndex.get(occNow);
+        if (oj !== undefined && this._nextPos[oj] === -1) {
+          if (!this._funcPIBT(chars, oj, cols, rows, idx, idToIndex)) {
             this._nextPos[i] = -1;
             this._occupiedNxt[ci] = -1;
             continue;
@@ -864,9 +892,35 @@ export class MotionEngine {
 
   _assignWanderTarget(char) {
     // Shape-constrained: pick from mask, biased toward drag if active
-    if (this._shapeChars.has(char.id) && this._shapeMask && this._shapeMask.length > 0) {
+    if (this._shapeChars.has(char.id) && this._shapeMaskSet.size > 0) {
       const dragging = this.dragBias && this.dragBias.strength > 0.2;
 
+      // strict（颜文字/巨字）非拖动：只在**锚点的小邻域**（曼哈顿≤2）里挑空格做就近
+      // 华容道滑动 → 邻域常数级扫描（不再遍历整张掩码，这是卡顿主因之一）；里字持续
+      // 小幅运动、轮廓与字数稳定（既保辨形又不静止）。
+      if (this._shapeConstraint === 'strict' && !dragging) {
+        const ax = char.anchorX != null ? char.anchorX : char.gridX;
+        const ay = char.anchorY != null ? char.anchorY : char.gridY;
+        const near = [];
+        for (let oy = -2; oy <= 2; oy++) {
+          const budget = 2 - Math.abs(oy);
+          for (let ox = -budget; ox <= budget; ox++) {
+            if (ox === 0 && oy === 0) continue;
+            const nx = ax + ox, ny = ay + oy;
+            if (!this._inMask(nx, ny)) continue;
+            if (nx === char.gridX && ny === char.gridY) continue;
+            if (this.grid.isOccupied(nx, ny)) continue;
+            near.push({ x: nx, y: ny });
+          }
+        }
+        if (near.length > 0) {
+          const pick = near[(Math.random() * near.length) | 0];
+          this._wanderTargets.set(char.id, { tx: pick.x, ty: pick.y });
+        }
+        return; // 邻域暂时无空格 → 本 tick 不设目标，下 tick 再试（不破坏字形）
+      }
+
+      // loose（花等）/ 拖动：在整片掩码内挑（频率较低、拖动是临时态）。
       const candidates = [];
       for (const c of this._shapeMask) {
         if (c.x === char.gridX && c.y === char.gridY) continue;
@@ -874,19 +928,9 @@ export class MotionEngine {
         candidates.push(c);
       }
       if (candidates.length > 0) {
-        // strict（颜文字/巨字）：在掩码内做"就近"华容道滑动 —— 滑向附近空格，
-        // 轮廓与字数固定但里字持续运动（动态呈现），既保辨形又不静止。
-        // loose（花等）：在整片掩码内自由远游。拖动时一律走 surge 选择。
-        const pick = (this._shapeConstraint === 'strict' && !dragging)
-          ? this._pickLocalShapeTarget(candidates, char)
-          : this._pickShapeTarget(candidates, char);
-        if (pick) {
-          this._wanderTargets.set(char.id, { tx: pick.x, ty: pick.y });
-          return;
-        }
+        const pick = this._pickShapeTarget(candidates, char);
+        if (pick) this._wanderTargets.set(char.id, { tx: pick.x, ty: pick.y });
       }
-      // 掩码内暂时无空格可去：本 tick 不强行设目标，下一 tick 再试，
-      // 避免被推到掩码外破坏形状。
       return;
     }
 

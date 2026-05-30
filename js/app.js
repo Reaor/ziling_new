@@ -24,8 +24,8 @@ import { MotionEngine } from './core/motion.js';
 import { ShapeSystem } from './core/shape.js';
 import { GestureRecognizer } from './input/gestures.js';
 
-const CELL_SIZE = 13;          // 网格分辨率（越小字形越细腻、笔画越易分开；里字仍可读）
-const FONT_SIZE = 12;          // 里字字号（嵌入 app 仍清晰；与 CELL_SIZE 留出间距防贴字）
+const CELL_SIZE = 15;          // 网格分辨率：笔画变细后适当调大格子 → 画面不空、里字更大更美观
+const FONT_SIZE = 13;          // 里字字号（格子变大 → 字可更大，嵌入 app 更清晰；留间距防贴字）
 const TICK_MS = 200;           // 常速 tick —— 匀速铁律（拖动期由引擎自行提速跟手）
 const SCATTER_RESTORE_MS = 2500;
 // 里字自适应 = 螺旋淡入/淡出（沿几条螺旋臂一个接一个，向内淡入/向外淡出）。
@@ -35,7 +35,7 @@ const SPIRAL_STAGGER_MS = 70;  // 同臂相邻里字的出发间隔（形成"一
 const SPIRAL_TURNS = 0.7;      // 螺旋缠绕圈数
 const INITIAL_CHARS = 56;      // 首屏播种数（之后随形状自适应增减）
 const MIN_CHARS = 28;
-const MAX_CHARS = 320;   // 巨字密集定形需要较多里字才能填满字身、清晰辨形（复杂字如"爱"尤甚）
+const MAX_CHARS = 220;   // 笔画变细 + 格子变大后，填满字身所需里字下降（也更流畅）
 // 流动呈现：里字沿路径流动，按形态分别控制填充率。
 //  - 闭环曲线(心形/花)：近乎全覆盖，线条才连续不断（用户反馈"曲线没被全覆盖"）。
 //  - 开放笔画(颜文字/巨字)：留更多空位 → 传送带推得动、更灵动（不要静止）。
@@ -82,10 +82,10 @@ document.addEventListener('DOMContentLoaded', () => {
   //   - 曲线/数学曲线：单条闭环路径 → flow（里字首尾相连绕圈流动）。
   // `cells` 是该形状里字数上限的提示（越大越密、越清晰）。里字数随掩码格数自适应增减。
   const SHAPES = [
-    { name: '^_^',  cells: 190, make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
-    { name: '>_<',  cells: 190, make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
-    { name: '心',   cells: 320, make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
-    { name: '春',   cells: 320, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
+    { name: '^_^',  cells: 120, make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
+    { name: '>_<',  cells: 120, make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
+    { name: '心',   cells: 200, make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
+    { name: '春',   cells: 200, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
     { name: '爱心', cells: 80,  make: n => shapes.sampleCurveOrdered('heart', gridCols, gridRows, n) },
     { name: '四叶花', cells: 96, make: n => shapes.sampleCurveOrdered('rose', gridCols, gridRows, n) },
   ];
