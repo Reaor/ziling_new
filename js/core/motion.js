@@ -182,11 +182,12 @@ export class MotionEngine {
    *   (颜文字/巨字, 易辨形); loose lets里字 roam the whole mask (curves/flowers).
    */
   setShapeMask(mask, charIds, constraint = 'loose') {
+    // 切换到掩码约束时清掉 flow 残留，避免里字还按旧路径流动。
+    this._flowOf.clear();
+    this._flowPaths = null;
     this._shapeMask = mask;
     this._shapeConstraint = constraint;
-    for (const id of charIds) {
-      this._shapeChars.add(id);
-    }
+    this._shapeChars = new Set(charIds);
     this._assignShapeTargets();
   }
 
@@ -898,12 +899,12 @@ export class MotionEngine {
    * 持续运动、绝不冻结。
    */
   _pickLocalShapeTarget(candidates, char) {
-    const scored = candidates
-      .map(c => ({ c, dist: Math.abs(c.x - char.gridX) + Math.abs(c.y - char.gridY) }))
-      .sort((a, b) => a.dist - b.dist);
-    const take = Math.max(3, Math.ceil(scored.length * 0.4));
-    const pool = scored.slice(0, Math.min(take, scored.length));
-    return pool[Math.floor(Math.random() * pool.length)].c;
+    // 紧约束：只滑向**紧邻**的空格（曼哈顿≤2）→ 轮廓稳定、只做小幅错动而非游走。
+    // 邻近无空格就留在原地（返回 null → 不设目标），避免被挤出去破坏字形。
+    const near = candidates.filter(c =>
+      Math.abs(c.x - char.gridX) + Math.abs(c.y - char.gridY) <= 2);
+    if (near.length === 0) return null;
+    return near[Math.floor(Math.random() * near.length)];
   }
 
   _pickShapeTarget(candidates, char) {
@@ -953,9 +954,12 @@ export class MotionEngine {
       .sort((a, b) => (a.y - b.y) || (a.x - b.x));
 
     const n = Math.min(chars.length, cells.length);
+    // 字少于格时，把里字均匀铺到掩码（floor(i*cells/chars)），让空位均匀分散在
+    // 整个字形而非堆在一边 → 轮廓处处饱满、清爽。
+    const spread = chars.length < cells.length;
     for (let i = 0; i < n; i++) {
       const char = chars[i];
-      const cell = cells[i];
+      const cell = cells[spread ? Math.floor(i * cells.length / chars.length) : i];
       this._wanderTargets.set(char.id, { tx: cell.x, ty: cell.y });
       char.anchorX = cell.x; // formation slot — strict shapes hold here
       char.anchorY = cell.y;
