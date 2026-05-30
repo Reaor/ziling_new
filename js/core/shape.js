@@ -93,11 +93,11 @@ export class ShapeSystem {
     const text = EMOJI_TEMPLATES[emojiKey] ? emojiKey : '^_^';
     // 颜文字 = 实心定形：眼/嘴笔画有 ≥2 格宽身段（配合较高网格分辨率）→ 里字在笔画内
     // "转大圈"循环流动（满填循环 flowfill），既动态又辨形稳、眼嘴粗细协调成脸。
-    const cells = this._rasterToCells(gridCols, gridRows, 0.30, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, text, W * 0.92, H * 0.50);
+    const cells = this._rasterToCells(gridCols, gridRows, 0.36, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, text, W * 0.86, H * 0.46);
       this._drawTextMask(ctx, text, W / 2, H / 2, fs, {
-        weight: 600,
-        strokeWidth: Math.max(SS * 0.35, fs * 0.028),
+        weight: 500,
+        strokeWidth: Math.max(SS * 0.3, fs * 0.02),
       });
     });
     const mask = this._sparsify(cells, maxChars);
@@ -125,11 +125,11 @@ export class ShapeSystem {
     // 巨字 = 实心定形：里字填满字身 → 即时辨形，对任意汉字都稳健（只需栅格化）。笔画有
     // ≥2 格宽身段（配合较高网格分辨率，密笔画字如"春"仍分得开），里字在笔画内"转大圈"
     // 循环流动（满填循环 flowfill）→ 既动态呈现又辨形稳。
-    const cells = this._rasterToCells(gridCols, gridRows, 0.40, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, char, W * 0.84, H * 0.84);
+    const cells = this._rasterToCells(gridCols, gridRows, 0.44, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, char, W * 0.74, H * 0.74);
       this._drawTextMask(ctx, char, W / 2, H / 2, fs, {
-        weight: 700,
-        strokeWidth: Math.max(SS * 0.3, fs * 0.015),
+        weight: 600,
+        strokeWidth: Math.max(SS * 0.25, fs * 0.012),
       });
     });
     const mask = this._sparsify(cells, maxChars);
