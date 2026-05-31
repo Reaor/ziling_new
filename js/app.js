@@ -126,6 +126,9 @@ document.addEventListener('DOMContentLoaded', () => {
     { name: '三角',  make: () => ({ mask: buildTriangleCells(), static: true }) },
     { name: '六边形', make: () => ({ mask: buildHexagonCells(), static: true }) },
     { name: '月牙',  make: () => ({ mask: buildCrescentCells(), static: true }) },
+    { name: '菱形',  make: () => ({ mask: buildDiamondCells(), static: true }) },
+    { name: '双环',  make: () => ({ mask: buildRingsCells(),   static: true }) },
+    { name: '箭头',  make: () => ({ mask: buildArrowCells(),   static: true }) },
     { name: '北京时间', clock: true },   // 即时时分秒：每秒重采样 HH/MM/SS 竖排 → 数字滚动
     // 进阶·动态曲线（里字匀速走格 + 形状自身周期性变化叠加）：
     { name: '正弦波', make: () => ({ mask: buildWaveCells(),   anim: 'wave' }) },
@@ -137,6 +140,9 @@ document.addEventListener('DOMContentLoaded', () => {
     { name: '脉动花', make: () => ({ mask: buildRoseCells(),   anim: 'bloom' }) },
     { name: '银河',   make: () => ({ mask: buildSpiralCells(), anim: 'galaxy' }) },
     { name: '摇摆竹帘', make: () => ({ mask: buildVBandsCells(), anim: 'curtain' }) },
+    { name: '扭动',   make: () => ({ mask: buildDiskCells(),      anim: 'twist' }) },
+    { name: '喷泉',   make: () => ({ mask: buildWideBlockCells(), anim: 'fountain' }) },
+    { name: '钟摆',   make: () => ({ mask: buildColumnCells(),    anim: 'pendulum' }) },
   ];
   let shapeIndex = 0;
   let shapeActive = false;
@@ -151,20 +157,24 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentConstraint = 'flow'; // 'strict'（颜文字/巨字）| 'flow'（曲线）
 
   // ── 原态↔动态 过渡（显示层驱动）──────────────────────────────────────────
-  // 动态里字很小、直接铺成文本行不利阅读。所以过渡做成：里字先快速排成旋转的圆，再逐个
-  // 优美放大、脱圈飞入正在变长的文本行（放大到适合阅读）；没排进去的还在圆上，圆随之扩大
-  // 避免交叠。反向（原态→动态）则文本里字逐个缩小回圈、再聚为动态形状。整个过程较快。
+  // 动态里字很小、直接铺成文本行不利阅读。新过渡（更丝滑、和动态游动衔接自然）：里字先像
+  // 拖动那样聚成一个"旋转的方形团"，停在要呈现的文本行上方（不与之重叠）；随后团里的字沿
+  // 边沿逐个放大、飞出排进下方正在变长的文本行；随着字陆续排出，方形团旋转**逐步加速**。
+  // 反向（原态→动态）= 时间反演：文本里字逐个缩回旋转方形团，再聚为动态形状。
   const ORIGIN_CELL = ORIGIN_FONT + 3;    // 原态每字占位（含间距）
-  const ORIGIN_MS = 1100;                 // 过渡时长（较快）
-  let originAnim = null;   // 进行中的过渡：{dir, t, chars:[{c,angle0,exited,ex,ey}], layout, after}
-  let originHold = null;   // 过渡完成后的原态保持：{chars, layout}（显示层渲染放大文本+轻浮动）
+  const ORIGIN_MS = 1300;                 // 过渡时长
+  const CLUSTER_CELL = CELL_SIZE + 2;     // 方形团里每字间距（小，紧凑成团）
+  let originAnim = null;   // 进行中的过渡：{dir,t,phase,chars,layout,square,clusterC,after}
+  let originHold = null;   // 完成后的原态保持：{chars, layout}
 
-  // 居中自动换行的放大文本布局（像素中心点）。n 个字 → 每字 ORIGIN_CELL 宽，行宽自适应居中。
+  // 居中自动换行的放大文本布局（像素中心点），整体下移到屏幕下部，给上方旋转方形团留位。
   function originPixelLayout(n) {
     const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE, pad = 8;
     const perRow = Math.max(1, Math.floor((W - pad * 2) / ORIGIN_CELL));
     const rowsN = Math.ceil(n / perRow);
-    const startY = Math.max(ORIGIN_CELL, (H - rowsN * ORIGIN_CELL) / 2 + ORIGIN_CELL / 2);
+    const blockH = rowsN * ORIGIN_CELL;
+    // 文本块放在屏幕中部偏下：顶部约 H*0.42，方形团置于其上方。
+    const startY = Math.max(H * 0.42, H * 0.34) + ORIGIN_CELL / 2;
     const pos = [];
     for (let i = 0; i < n; i++) {
       const r = Math.floor(i / perRow);
@@ -172,7 +182,15 @@ document.addEventListener('DOMContentLoaded', () => {
       const sx = (W - rc * ORIGIN_CELL) / 2 + ORIGIN_CELL / 2;
       pos.push({ x: sx + (i - r * perRow) * ORIGIN_CELL, y: startY + r * ORIGIN_CELL });
     }
-    return pos;
+    return { pos, textTopY: startY - ORIGIN_CELL / 2, blockH };
+  }
+
+  // 方形团里第 i 个里字（共 n）相对团心的未旋转偏移（行优先填成接近正方形）。
+  function clusterOffset(i, n) {
+    const S = Math.max(1, Math.ceil(Math.sqrt(n)));
+    const col = i % S, row = Math.floor(i / S);
+    const rowsN = Math.ceil(n / S);
+    return { dx: (col - (S - 1) / 2) * CLUSTER_CELL, dy: (row - (rowsN - 1) / 2) * CLUSTER_CELL, S };
   }
 
   // ── 里字自适应 = 螺旋淡入/淡出（显示层动画，绕开 PIBT，收束 L4）──────────
@@ -336,7 +354,8 @@ document.addEventListener('DOMContentLoaded', () => {
     stopClock();                 // 切到任何普通形状都停掉时钟定时器
     flushTransit();              // 先收尾上一形状未完成的螺旋过渡（防连切把字卡没）
     originAnim = null; originHold = null;
-    for (const c of pool.getAll()) c.dispScale = 1;  // 清除原态放大，动态里字恢复常规大小
+    // 复位显示属性：清除原态放大 + 把在册里字 alpha 拉回 1（防极端竞态留下 alpha=0 的隐形字）。
+    for (const c of pool.getAll()) { c.dispScale = 1; if (!transitIds.has(c.id)) { c.alpha = 1; c.animA = 1; c.flowFade = 1; } }
     shapeActive = true;
     inOrigin = false;
     currentAnim = sampled.anim ? ANIMS[sampled.anim] : null; // 动态曲线开启形状自身动态
@@ -516,6 +535,35 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     return cells;
   }
+  // 菱形（钻石）描边：|dx|/A + |dy|/B = 1 附近的格子。
+  function buildDiamondCells() {
+    const cells = [], cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2;
+    const A = Math.min(gridCols, gridRows) * 0.42, B = A * 1.15;
+    for (let y = 0; y < gridRows; y++) for (let x = 0; x < gridCols; x++) {
+      const v = Math.abs(x - cx) / A + Math.abs(y - cy) / B;
+      if (v > 0.86 && v < 1.06) cells.push({ x, y });
+    }
+    return cells;
+  }
+  // 同心双环：两个半径不同的圆环（描边）。
+  function buildRingsCells() {
+    const cells = [], cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2, R = Math.min(gridCols, gridRows) * 0.44;
+    for (let y = 0; y < gridRows; y++) for (let x = 0; x < gridCols; x++) {
+      const d = Math.hypot(x - cx, y - cy);
+      if ((d > R - 1 && d < R + 0.6) || (d > R * 0.55 - 1 && d < R * 0.55 + 0.6)) cells.push({ x, y });
+    }
+    return cells;
+  }
+  // 箭头（↑）：竖杆 + 顶部两斜边。
+  function buildArrowCells() {
+    const cells = [], seen = new Set(), cx = Math.floor(gridCols / 2);
+    const top = Math.floor(gridRows * 0.16), bot = Math.floor(gridRows * 0.84);
+    const put = (x, y) => { x = Math.round(x); y = Math.round(y); if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) return; const k = y * gridCols + x; if (seen.has(k)) return; seen.add(k); cells.push({ x, y }); };
+    for (let y = top; y <= bot; y++) { put(cx, y); put(cx - 1, y); }      // 竖杆（2 宽）
+    const head = Math.floor(gridRows * 0.34);
+    for (let i = 0; i <= head - top; i++) { put(cx - i, top + i); put(cx - 1 + i, top + i); } // 左右斜边
+    return cells;
+  }
 
   // 银河：两条对数螺旋臂（绕心刚体旋转 → 旋臂卷动）。
   function buildSpiralCells() {
@@ -526,6 +574,18 @@ document.addEventListener('DOMContentLoaded', () => {
       if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) continue;
       const k = y * gridCols + x; if (seen.has(k)) continue; seen.add(k); cells.push({ x, y });
     }
+    return cells;
+  }
+  // 宽矮块（喷泉底形）：占下半屏的横向宽块，上抛动画有纵向空间。
+  function buildWideBlockCells() {
+    const cells = [], m = 2, y0 = Math.floor(gridRows * 0.45), y1 = gridRows - 4;
+    for (let y = y0; y < y1; y++) for (let x = m; x < gridCols - m; x++) cells.push({ x, y });
+    return cells;
+  }
+  // 竖条（钟摆底形）：居中一根满高的粗竖条，绕顶端摆动。
+  function buildColumnCells() {
+    const cells = [], cx = Math.floor(gridCols / 2), m = 3;
+    for (let y = m; y < gridRows - m; y++) for (let dx = -2; dx <= 2; dx++) cells.push({ x: cx + dx, y });
     return cells;
   }
 
@@ -570,6 +630,27 @@ document.addEventListener('DOMContentLoaded', () => {
     },
     // 新②摇摆竖帘：每列整体左右摆（列内同移、列间相位差小 → 0 重叠）→ 风中竹帘。
     curtain: (c, t) => { c.displayX += Math.sin(t * 1.6 + c.gridX * 0.25) * CC() * 2.2; },
+    // 新③扭动螺旋：把整盘按"半径相关的小角度"扭转并往复（剪切扭动，幅度小 → 不重叠）→ 麻花扭动。
+    twist: (c, t) => {
+      const { cx, cy } = cen();
+      const bx = c.gridX * CC() - cx, by = c.gridY * CC() - cy, r = Math.hypot(bx, by);
+      const a = Math.atan2(by, bx) + Math.sin(t * 1.4) * 0.45 * (r / (Math.min(gridCols, gridRows) * CC() * 0.4));
+      c.displayX = cx + r * Math.cos(a); c.displayY = cy + r * Math.sin(a);
+    },
+    // 新④喷泉：每列里字按列相位做"上抛-回落"的竖向行波（仅竖向位移、梯度<1 → 不重叠）。
+    fountain: (c, t) => {
+      const ph = t * 2.2 - c.gridX * 0.45;
+      c.displayY -= (Math.sin(ph) * 0.5 + 0.5) * CC() * 3.2;   // 始终向上抛起再落回
+    },
+    // 新⑤钟摆：整列绕顶部支点摆动（同列同角、相邻列相位接近 → 不重叠）→ 节拍器/钟摆。
+    pendulum: (c, t) => {
+      const W = gridCols * CELL_SIZE, pivotY = gridRows * CELL_SIZE * 0.12;
+      const ang = Math.sin(t * 1.5) * 0.5;
+      const bx = c.gridX * CC() - W / 2, by = c.gridY * CC() - pivotY;
+      const s = Math.sin(ang), co = Math.cos(ang);
+      c.displayX = W / 2 + bx * co - by * s;
+      c.displayY = pivotY + bx * s + by * co;
+    },
   };
 
   // 调试入口：即时呈现任意巨字(串)/指定颜文字/指定曲线（接入云端 AI 后即用这些）。
@@ -631,49 +712,51 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // 启动过渡：dir='toOrigin'（圆→放大文本行）或 'toShape'（文本行→缩回圆→交给形状）。
+  // 启动过渡：dir='toOrigin'（聚成旋转方形团→逐个飞出排成放大文本行）或 'toShape'（反演）。
   function startOriginTransition(dir, alive, after) {
-    const layout = originPixelLayout(alive.length);
-    const chars = alive.map((c, i) => ({ c, idx: i, angle0: (i / alive.length) * Math.PI * 2,
-      exited: false, ex: c.displayX, ey: c.displayY }));
-    originAnim = { dir, t: 0, chars, layout, after };
+    const L = originPixelLayout(alive.length);
+    const W = gridCols * CELL_SIZE;
+    const S = Math.max(1, Math.ceil(Math.sqrt(alive.length)));
+    const clusterH = Math.ceil(alive.length / S) * CLUSTER_CELL;
+    const clusterC = { x: W / 2, y: Math.max(clusterH / 2 + 6, L.textTopY - clusterH / 2 - 14) };
+    // 记下每个里字过渡开始时的显示位（聚团阶段从这里渐入团）。
+    const chars = alive.map((c, i) => ({ c, idx: i,
+      sx: c.displayX + CELL_SIZE / 2, sy: c.displayY + CELL_SIZE / 2 }));
+    originAnim = { dir, t: 0, chars, layout: L.pos, clusterC, after, phase: 0 };
     originHold = null;
   }
 
-  // 每帧推进原态过渡：里字在"旋转圆"和"放大文本行"之间按各自错峰进度平滑插值；圆随已离开
-  // 的里字增多而扩大（避免交叠）。toShape 是 toOrigin 的时间反演。完成后落到 hold 或回调。
+  // 每帧推进过渡。三个位置：start（过渡开始位）→ square（旋转方形团格位）→ text（放大文本位）。
+  // f：0=动态侧 1=文本侧。f<GATHER 聚团（start→square）；其后逐字 emit（square→text，错峰、放大）。
+  // 团旋转随 emit 进度加速。toShape = 时间反演（f 由 1→0：text→square→start，由 after 再聚成形状）。
   const easeIO = u => u * u * (3 - 2 * u);
   function updateOriginTransition(dtMs, now) {
     const A = originAnim;
     A.t = Math.min(1, A.t + dtMs / ORIGIN_MS);
-    const g = A.dir === 'toOrigin' ? A.t : 1 - A.t;   // g: 0=全在圆上 … 1=全在文本行
-    const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE, cx = W / 2, cy = H / 2;
+    const f = A.dir === 'toOrigin' ? A.t : 1 - A.t;
     const N = A.chars.length;
-    const spin = (now / 1000) * 1.7;
-    // 圆半径随成形进度 g 扩大：留在圆上的越少、圈反而越大 → 不交叠、有"扩散"感。
-    const R = Math.min(W, H) * (0.16 + 0.20 * g);
-    const stagger = 0.55;                       // 各字出发时间错峰窗口
+    const GATHER = 0.30;
+    const gather = easeIO(Math.min(1, f / GATHER));
+    const emitG = Math.max(0, (f - GATHER) / (1 - GATHER));   // 全局排字进度 0→1
+    A.phase += dtMs / 1000 * (0.9 + 2.6 * emitG);             // 排出越多转越快
+    const cs = Math.cos(A.phase), sn = Math.sin(A.phase), cc = A.clusterC;
     for (const it of A.chars) {
-      const startG = (it.idx / N) * stagger;
-      const local = Math.max(0, Math.min(1, (g - startG) / (1 - stagger + 1e-6)));
-      const e = easeIO(local);
-      const oAng = it.angle0 + spin;
-      const oX = cx + R * Math.cos(oAng), oY = cy + R * Math.sin(oAng);
+      const off = clusterOffset(it.idx, N);
+      const sqX = cc.x + (off.dx * cs - off.dy * sn), sqY = cc.y + (off.dx * sn + off.dy * cs);
+      // 该字的 emit 进度（错峰：idx 越大越晚飞出 → 一个接一个）。
+      const startE = (it.idx / N) * 0.6;
+      const e = easeIO(Math.max(0, Math.min(1, (emitG - startE) / 0.4)));
+      // 聚团位：start→square（按 gather）；再 square→text（按 e）。
+      const ancX = it.sx + (sqX - it.sx) * gather, ancY = it.sy + (sqY - it.sy) * gather;
       const tg = A.layout[it.idx];
-      it.c.displayX = oX + (tg.x - oX) * e - CELL_SIZE / 2;
-      it.c.displayY = oY + (tg.y - oY) * e - CELL_SIZE / 2;
-      it.c.dispScale = 1 + (ORIGIN_FONT / FONT_SIZE - 1) * e;  // 1 → 放大；渲染层据此放大字号
+      it.c.displayX = (ancX + (tg.x - ancX) * e) - CELL_SIZE / 2;
+      it.c.displayY = (ancY + (tg.y - ancY) * e) - CELL_SIZE / 2;
+      it.c.dispScale = 1 + (ORIGIN_FONT / FONT_SIZE - 1) * e;
       it.c.alpha = 1; it.c.animA = 1; it.c.flowFade = 1;
     }
     if (A.t >= 1) {
-      if (A.dir === 'toOrigin') {
-        originHold = { chars: A.chars, layout: A.layout };
-        originAnim = null;
-      } else {
-        const cb = A.after; originAnim = null;
-        A.chars.forEach(it => { it.c.dispScale = 1; });
-        if (cb) cb();
-      }
+      if (A.dir === 'toOrigin') { originHold = { chars: A.chars, layout: A.layout }; originAnim = null; }
+      else { const cb = A.after; originAnim = null; A.chars.forEach(it => { it.c.dispScale = 1; }); if (cb) cb(); }
     }
   }
 
@@ -785,7 +868,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     ['五角星', 'star'], ['风车', 'pinwheel'], ['蝴蝶', 'butterfly'],
                     ['李萨如', 'lissajous'], ['旋轮花', 'spiro']];
     for (const [label, type] of curves) r3.append(mkBtn(label, () => applyCurve(type)));
-    const statics = [['三角', buildTriangleCells], ['六边形', buildHexagonCells], ['月牙', buildCrescentCells]];
+    const statics = [['三角', buildTriangleCells], ['六边形', buildHexagonCells], ['月牙', buildCrescentCells],
+                     ['菱形', buildDiamondCells], ['双环', buildRingsCells], ['箭头', buildArrowCells]];
     for (const [label, build] of statics)
       r3.append(mkBtn(label, () => formSampled({ mask: build(), static: true }, label)));
 
@@ -795,7 +879,8 @@ document.addEventListener('DOMContentLoaded', () => {
                    ['DNA双螺旋', 'dna', buildVBandsCells], ['涟漪', 'pulse', buildDiskCells],
                    ['旋涡', 'vortex', buildDiskCells], ['绸缎', 'cloth', buildBlockCells],
                    ['脉动花', 'bloom', buildRoseCells], ['银河', 'galaxy', buildSpiralCells],
-                   ['摇摆竹帘', 'curtain', buildVBandsCells]];
+                   ['摇摆竹帘', 'curtain', buildVBandsCells], ['扭动', 'twist', buildDiskCells],
+                   ['喷泉', 'fountain', buildWideBlockCells], ['钟摆', 'pendulum', buildColumnCells]];
     for (const [label, anim, build] of anims)
       r6.append(mkBtn(label, () => formSampled({ mask: build(), anim }, label)));
 
@@ -868,6 +953,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     onDoubleTap() {
       if (originAnim) return;
+      clearTimeout(scatterTimer);   // 取消前一下 onTap 可能挂起的散开/归位，避免与切形状打架
       triggerMicro();
       if (inOrigin || originHold) { enterShape(false); return; } // 原态→动态（回到当前形状）
       applyShape(shapeIndex + 1);                   // 动态→切下一个形状
@@ -913,6 +999,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let lastFpsLog = performance.now();
   let lastCheckSecond = -1;
   let collisionOk = true;
+  let blankFrames = 0;   // 连续"几乎空屏"帧计数 → 触发自愈
 
   function loop(now) {
     if (!running) { requestAnimationFrame(loop); return; }
@@ -968,11 +1055,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // 渲染用**预渲染字形位图 + drawImage**（而非每帧数百次 fillText）→ 大幅降帧耗、消除卡顿。
     const tSec = now / 1000;
     const amp = motion.isOrbiting() ? 0 : microEnv * MICRO_AMP;
+    let drawn = 0;
     for (const char of pool.getAll()) {
       // 流动淡入/淡出（开放笔画首端淡入、尾端淡出）与螺旋淡入淡出 alpha 相乘。
       const eff = char.alpha * (char.flowFade != null ? char.flowFade : 1)
                 * (char.animA != null ? char.animA : 1);
       if (eff > 0.01) {
+        drawn++;
         const mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
         const my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
         ctx.globalAlpha = eff;
@@ -984,6 +1073,18 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
     ctx.globalAlpha = 1;
+
+    // 安全网：不在过渡/拖动中，却连续多帧"屏幕上几乎没有可见里字"（双击连切等极端竞态导致），
+    // 则强制把所有里字 alpha 复位并按当前形状重排 → 自愈，绝不出现"双击后空屏"。
+    if (!originAnim && !originHold && !motion.isOrbiting() && pool.count() > 0) {
+      blankFrames = drawn < 3 ? blankFrames + 1 : 0;
+      if (blankFrames > 20) {
+        blankFrames = 0;
+        for (const c of pool.getAll()) { c.alpha = 1; c.animA = 1; c.flowFade = 1; c.dispScale = 1; }
+        if (shapeActive && currentCells.length) formCurrent(); else motion.releaseShape();
+        console.warn('recovered from blank frame');
+      }
+    } else blankFrames = 0;
 
     if (DEBUG) {
       const instantFps = dtMs > 0 ? (1000 / dtMs).toFixed(0) : '-';

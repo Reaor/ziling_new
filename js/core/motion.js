@@ -39,8 +39,9 @@ export class MotionEngine {
     // 拖动这一"模态"整体走得更快），让里字能跟手追上被拖去的位置；松手后
     // 在动量衰减期间平滑回落到常速。详见 _effectiveTick()。
     this.dragTickDuration = 85;
-    this.reformTickDuration = 95;  // 形状重排提速时的 tick（比常速 200 快约一倍）
+    this.reformTickDuration = 80;  // 形状重排提速的最快 tick（比常速 200 快约一倍半）
     this._reformBoostMs = 0;       // >0 时启用重排提速，逐帧递减
+    this.reformBoostTotal = 1400;  // 提速窗口总时长（用于渐进回落比例）
     this._dragActive = false;
     this.accumulatedTime = 0;
     this.tickProgress = 0;
@@ -703,14 +704,19 @@ export class MotionEngine {
       const s = Math.max(0, Math.min(1, this.dragBias.strength));
       return this.dragTickDuration + (this.tickDuration - this.dragTickDuration) * (1 - s);
     }
-    // 形状变换重排提速：成形/切换后短时间内 tick 更短（里字更快滑到新位），到位即恢复常速
-    // （形状内的常态运动速率不变）。
-    if (this._reformBoostMs > 0) return this.reformTickDuration;
+    // 形状变换重排提速：用一条"钟形"曲线平滑调速 —— 切换瞬间从常速**逐步加快**到最快，
+    // 大致成形后再**逐步放慢**回常速（而非瞬间变快/到点突变）。整个过程平缓自然。
+    // 形状内的常态运动速率不变（boost 用尽即恒为常速）。
+    if (this._reformBoostMs > 0) {
+      const p = 1 - this._reformBoostMs / this.reformBoostTotal;   // 0→1 贯穿提速窗口
+      const bell = Math.sin(Math.max(0, Math.min(1, p)) * Math.PI); // 0→1→0：先加速后减速
+      return this.tickDuration + (this.reformTickDuration - this.tickDuration) * bell;
+    }
     return this.tickDuration;
   }
 
-  /** 触发一次形状重排提速（持续 ms 毫秒，期间里字滑动更快）。 */
-  boostReform(ms = 1100) { this._reformBoostMs = ms; }
+  /** 触发一次形状重排提速（持续 ms 毫秒，期间 tick 由快渐进回落到常速）。 */
+  boostReform(ms = 1400) { this._reformBoostMs = ms; this.reformBoostTotal = ms; }
 
   updateDisplayPositions(progress) {
     const cs = this.cellSize;
