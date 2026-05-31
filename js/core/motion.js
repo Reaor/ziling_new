@@ -81,6 +81,7 @@ export class MotionEngine {
     this._flowPaths = null;          // Array<{cells:[{x,y}], loop:bool, dir:1|-1}>
     this._flowAllowDiag = false;     // flow 路径含对角步(骨架巨字)→允许里字走对角；曲线→false
     this._flowOf = new Map();        // charId → { p:pathIdx, i:cellIdx }
+    this._originTargets = new Map(); // origin(原态文本行): charId → 被钉住的文本格 {x,y}
 
     // Orbit（拖动环绕）state —— 显示层驱动的同心方块旋转，跟手整体平移、逐渐加速。
     this._orbit = false;
@@ -355,6 +356,39 @@ export class MotionEngine {
     this._flowOf.clear();
     this._orbit = false;
     this._orbitOf.clear();
+  }
+
+  /**
+   * 原态（文本行）：把 charIds 钉到一组文本格 `cells` 上（每字一个唯一格）。里字沿格子
+   * （华容道式）滑到各自文本位置后被钉住静止 → 呈现"正常文本行排版"。无流动、无漫游。
+   * 由动态切到原态、或反向，都靠"重指目标 + PIBT 沿格滑动"完成，运动美观且匀速。
+   * @param {Array<{x,y}>} cells —— 文本行格子（顺序即阅读序：左→右、上→下）
+   * @param {number[]} charIds
+   */
+  setTextLine(cells, charIds) {
+    for (const id of this._shapeChars) { const c = this.characters.get(id); if (c) c.flowFade = 1; }
+    this._flowOf.clear();
+    this._flowPaths = null;
+    this._orbit = false;
+    this._orbitOf.clear();
+    this._shapeConstraint = 'origin';
+    this._shapeChars = new Set(charIds);
+    this._shapeMask = cells;
+    this._rebuildMaskSet();
+    this._originTargets = new Map();
+    // 就近匹配：里字与文本格都按阅读序(y,x)排序后一一对应 → 整体平移少、交叉少、过渡干净。
+    const ids = charIds.map(id => this.characters.get(id)).filter(Boolean);
+    ids.sort((a, b) => (a.gridY - b.gridY) || (a.gridX - b.gridX));
+    const sorted = cells.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
+    for (let i = 0; i < ids.length; i++) {
+      const cell = sorted[i] || sorted[sorted.length - 1];
+      if (!cell) continue;
+      this._originTargets.set(ids[i].id, { x: cell.x, y: cell.y });
+      this._wanderTargets.set(ids[i].id, { tx: cell.x, ty: cell.y });
+      this._stuckTicks.set(ids[i].id, 0);
+      const d = DIRS[(Math.random() * 4) | 0];
+      this._currentDirs.set(ids[i].id, { dx: d.dx, dy: d.dy });
+    }
   }
 
   // ── Flow（流动）—— 里字沿有序环路逐格单列流动 ────────────────
@@ -761,6 +795,8 @@ export class MotionEngine {
             // 到达当前路径格 → 推进一格（少量随机停顿，避免像弹簧一样单调）。
             if (Math.random() < 0.08) this._setFlowTarget(char.id); // 偶尔停顿一拍（更自然）
             else this._advanceFlowIndex(char.id);
+          } else if (this._shapeConstraint === 'origin') {
+            // 原态：到位即钉住——保留目标(=自身文本格)，stay 永远胜出 → 静止保持文本行位置。
           } else {
             this._wanderTargets.delete(char.id);
             // strict（颜文字/巨字）= 收紧的就近游走：每个里字持续做小幅横纵位移
@@ -789,6 +825,10 @@ export class MotionEngine {
             // 满填循环里卡住（无论在字形内还是外）→ 朝**最近的空掩码格**走：在外的走进
             // 字形（入场、收束），在内的去填最近的空隙（消除静止、分布更均匀更密）。
             this._assignFlowFillTarget(char);
+          } else if (this._shapeConstraint === 'origin') {
+            // 原态被堵 → 重新指向自己的文本格，继续沿格子挪过去（不乱给随机目标）。
+            const t = this._originTargets && this._originTargets.get(char.id);
+            if (t) this._wanderTargets.set(char.id, { tx: t.x, ty: t.y });
           } else {
             // Force a new target — PIBT will naturally find a way out
             this._assignWanderTarget(char);
@@ -847,8 +887,10 @@ export class MotionEngine {
     const grid = this.grid;
     const target = this._wanderTargets.get(char.id);
     const isShape = this._shapeChars.has(char.id);
-    const isInsideShape = isShape && this._shapeMaskSet.size > 0 &&
-      this._inMask(char.gridX, char.gridY);
+    // origin（原态文本行）不做掩码围栏：里字靠"唯一目标格 + stay 胜出"被钉住，途中需自由
+    // 穿行去各自文本格，故不限制在掩码内。其余成形模式(strict/flowfill)仍围栏在字形内。
+    const isInsideShape = isShape && this._shapeConstraint !== 'origin' &&
+      this._shapeMaskSet.size > 0 && this._inMask(char.gridX, char.gridY);
 
     // Candidates: [stay] + [neighbors] — only unoccupied. flow 用 8 邻域（含对角），
     // 让里字能沿细化骨架的斜笔画逐格流动、不靠加粗桥接、保持单薄细线；其余模式仍 4 邻域。

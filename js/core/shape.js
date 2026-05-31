@@ -132,9 +132,9 @@ export class ShapeSystem {
     });
     const density = this._cellsDensity(probe);
     let p;
-    if (density < 0.34)      p = { weight: 700, sw: SS * 0.40, thr: 0.34, fit: 0.70 }; // 简单字：加粗、厚实
-    else if (density < 0.46) p = { weight: 600, sw: SS * 0.15, thr: 0.42, fit: 0.73 }; // 常规
-    else                     p = { weight: 300, sw: 0,         thr: 0.50, fit: 0.78 }; // 复杂字：变细、笔画分得开
+    if (density < 0.34)      p = { weight: 700, sw: SS * 0.40, thr: 0.34, fit: 0.70, fill: 0.95 }; // 简单字：加粗、厚实、填满更密(内部不松散)
+    else if (density < 0.46) p = { weight: 600, sw: SS * 0.15, thr: 0.42, fit: 0.73, fill: 0.90 }; // 常规
+    else                     p = { weight: 300, sw: 0,         thr: 0.50, fit: 0.78, fill: 0.85 }; // 复杂字：变细、笔画分得开
 
     const cells = this._rasterToCells(gridCols, gridRows, p.thr, (ctx, W, H) => {
       const fs = this._fitFont(ctx, char, W * p.fit, H * p.fit);
@@ -144,7 +144,7 @@ export class ShapeSystem {
     this.currentMask = mask;
     this.currentShape = char;
     this.constraintType = 'strict';
-    return { mask, constraint: 'strict' };
+    return { mask, constraint: 'strict', fill: p.fill };
   }
 
   /** 字身格的"墨密度" = 格数 / 外接框面积（0..1）。高 → 笔画密集复杂；低 → 简单稀疏。@private */

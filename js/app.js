@@ -114,6 +114,7 @@ document.addEventListener('DOMContentLoaded', () => {
   ];
   let shapeIndex = 0;
   let shapeActive = false;
+  let inOrigin = false;         // 原态（文本行）态：长按进入；点/双击/拖动回到动态形状
   let currentPaths = null;      // flow（曲线）的有序路径；strict 时为 null
   let currentCells = [];        // 当前形状占用的格子（strict 掩码 / flow 路径格的并集）
   let currentConstraint = 'flow'; // 'strict'（颜文字/巨字）| 'flow'（曲线）
@@ -267,7 +268,9 @@ document.addEventListener('DOMContentLoaded', () => {
       currentConstraint = 'strict';
       currentPaths = null;
       currentCells = sampled.mask;
-      target = Math.round(sampled.mask.length * STRICT_FILL);
+      // 满填循环流动：里字数 ≈ 掩码格数 × fill（按字复杂度自适应：简单字更密不松散、复杂字
+      // 留更多缝隙供循环）。不强行抬到 MIN_CHARS（否则小字形会多出无处安放的里字乱游）。
+      target = Math.round(sampled.mask.length * (sampled.fill != null ? sampled.fill : STRICT_FILL));
     } else {
       return;
     }
@@ -297,10 +300,57 @@ document.addEventListener('DOMContentLoaded', () => {
 
   function releaseShape() {
     shapeActive = false;
+    inOrigin = false;
     currentPaths = null;
     currentCells = [];
     motion.releaseShape();
     console.log('Shape released → free wander');
+  }
+
+  // ── 原态（文本行）↔ 动态（形状）────────────────────────────────────────
+  // 原态 = 把现有里字按"正常文本行"居中排版钉住静止（带极轻微浮动增加生命感，收束 L28）。
+  // 里字内容不变（动态里的里字本就来自原态文本）；动态↔原态都靠 PIBT 沿格子滑动，匀速美观
+  // （华容道式，收束 L4/L29）。长按动态→原态；原态里点/双击/拖动→回到动态形状。
+
+  // 为 n 个里字生成居中文本行格子（每行居中、行距 2 格→像段落；过高则压缩行距/加宽）。
+  function buildTextLineCells(n) {
+    const maxCols = Math.max(6, gridCols - 2);
+    let perRow = Math.min(maxCols, Math.max(8, Math.round(Math.sqrt(n) * 1.7)));
+    let rowsN = Math.ceil(n / perRow);
+    let lineGap = 2;
+    while (rowsN * lineGap > gridRows - 2 && lineGap > 1) lineGap = 1;
+    while (rowsN * lineGap > gridRows - 2 && perRow < maxCols) { perRow++; rowsN = Math.ceil(n / perRow); }
+    const blockH = (rowsN - 1) * lineGap + 1;
+    const startRow = Math.max(1, Math.floor((gridRows - blockH) / 2));
+    const cells = [];
+    for (let i = 0; i < n; i++) {
+      const r = Math.floor(i / perRow);
+      const rowCount = (r === rowsN - 1) ? (n - r * perRow) : perRow; // 该行字数（末行可能不满）
+      const rowStart = Math.max(0, Math.floor((gridCols - rowCount) / 2));
+      const c = i - r * perRow;
+      cells.push({ x: rowStart + c, y: startRow + r * lineGap });
+    }
+    return cells;
+  }
+
+  // 动态 → 原态：把在册里字钉成文本行。
+  function enterOrigin() {
+    if (inOrigin) return;
+    clearTimeout(scatterTimer);
+    if (motion.isOrbiting()) motion.endOrbit();
+    const ids = aliveIds();
+    if (ids.length === 0) return;
+    const cells = buildTextLineCells(ids.length);
+    motion.setTextLine(cells, ids);
+    inOrigin = true;
+    shapeActive = false;
+    console.log(`→ 原态文本行 (${ids.length} 里字)`);
+  }
+
+  // 原态 → 动态：回到形状（advance=true 则切下一个）。里字从文本行沿格子滑进字形。
+  function enterShape(advance) {
+    inOrigin = false;
+    applyShape(advance ? shapeIndex + 1 : shapeIndex);
   }
 
   // Reconstrain里字 to the current shape (used after scatter / break restore).
@@ -325,8 +375,8 @@ document.addEventListener('DOMContentLoaded', () => {
     formCurrent();
   }
 
-  // Form the first shape shortly after load.
-  setTimeout(() => applyShape(0), 800);
+  // 初次进入先呈现原态文本行（收束 L5）；点/双击/拖动即进入动态形状。
+  setTimeout(() => enterOrigin(), 800);
 
   // ── 调试面板（网页快捷查验：任意巨字 / 全部颜文字 / 曲线）─────────────────
   // 接入云端 AI 后即用 applyMegachar/applyEmojiKey 这些入口即时呈现任意字。
@@ -412,6 +462,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const gestures = new GestureRecognizer(renderer.canvas, CELL_SIZE, {
     onTap(col, row) {
+      if (inOrigin) { triggerMicro(); enterShape(false); return; } // 原态→动态
       if (!shapeActive) return;
       clearTimeout(scatterTimer);
       triggerMicro(); // 点击伴随的微动反应（全体一起轻摆一下）
@@ -431,17 +482,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
     onDoubleTap() {
       triggerMicro();
-      applyShape(shapeIndex + 1);
+      if (inOrigin) { enterShape(false); return; } // 原态→动态（回到当前形状）
+      applyShape(shapeIndex + 1);                   // 动态→切下一个形状
     },
 
     onLongPress() {
-      releaseShape();
+      // 长按：动态→回归原态文本行。阈值 650ms + 任意 >8px 移动即转为拖动 → 拖着玩不会误触。
+      if (inOrigin) return;
+      enterOrigin();
     },
 
     // 拖动（收束 L30）：里字聚成方形，按同心方环逐层旋转、越拖越快；中心=手指、
     // 整块跟手平移；松手在落点还原之前的形状。由显示层驱动（见渲染循环）。
     onDragStart(col, row, px, py) {
-      if (!shapeActive) return;
+      if (inOrigin) enterShape(false); // 原态→动态，随即跟手环绕
       dragging = true;
       dragEnd = { col, row };
       orbitFinger = { x: px, y: py };
@@ -494,6 +548,14 @@ document.addEventListener('DOMContentLoaded', () => {
     } else {
       motion.update(dtMs);
       motion.updateDisplayPositions(motion.tickProgress);
+      if (inOrigin) {
+        // 原态轻微浮动（收束 L28）：每字按 id 错相做极小幅正弦摆动 → 文本行有生命感但仍易读。
+        const t = now / 1000;
+        for (const c of aliveChars()) {
+          c.displayX += Math.sin(t * 1.3 + c.id * 0.7) * 1.1;
+          c.displayY += Math.cos(t * 1.0 + c.id * 1.3) * 1.1;
+        }
+      }
     }
     updateSpirals(dtMs); // 螺旋淡入/淡出（在显示位置更新之后，覆盖过渡里字的显示）
     if (microEnv > 0) microEnv = Math.max(0, microEnv - dtMs / MICRO_DECAY_MS);
