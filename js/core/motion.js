@@ -79,6 +79,7 @@ export class MotionEngine {
 
     // Flow（多路径流动）state
     this._flowPaths = null;          // Array<{cells:[{x,y}], loop:bool, dir:1|-1}>
+    this._flowAllowDiag = false;     // flow 路径含对角步(骨架巨字)→允许里字走对角；曲线→false
     this._flowOf = new Map();        // charId → { p:pathIdx, i:cellIdx }
 
     // Orbit（拖动环绕）state —— 显示层驱动的同心方块旋转，跟手整体平移、逐渐加速。
@@ -392,6 +393,16 @@ export class MotionEngine {
     this._shapeChars = new Set(charIds);
     this._flowOf.clear();
 
+    // 路径是否含对角步？含 → 是细化骨架(巨字)，允许里字走对角沿斜笔画流动；不含 → 是 4 连通
+    // 曲线，禁用对角（防抄近道/重叠）。在 _pibtBody 里据此选 4/8 邻域。
+    this._flowAllowDiag = norm.some(p => {
+      for (let k = 1; k < p.cells.length; k++) {
+        if (Math.abs(p.cells[k].x - p.cells[k - 1].x) === 1 &&
+            Math.abs(p.cells[k].y - p.cells[k - 1].y) === 1) return true;
+      }
+      return false;
+    });
+
     // union of all path cells → PIBT containment mask
     const seenM = new Set();
     const mask = [];
@@ -497,8 +508,6 @@ export class MotionEngine {
       const char = this.characters.get(id);
       if (!char) continue;
       const L = path.cells.length;
-      // 渐隐格数随笔画长度自适应：短笔画少渐隐（否则整条发暗），长笔画首/尾各 2 格。
-      const FADE = Math.max(1, Math.min(2, Math.floor(L / 4)));
 
       if (!path.loop && L > 1) {
         const tail = path.cells[L - 1];
@@ -515,13 +524,13 @@ export class MotionEngine {
         }
       }
 
-      // 淡入/淡出因子：闭环或极短笔画恒亮；开放笔画首/尾 FADE 格内 0→1→…→0。
-      if (path.loop || L <= 3) {
+      // 淡入/淡出因子：只把开放笔画"最末/最首那一格"压到 0.5（淡入淡出 + 掩盖尾→首传送带
+      // 回收的瞬移），中间一律全亮。旧版首尾各 2 格渐隐 + 传送带把里字堆在尾端 → 一大簇中段
+      // 里字发暗（用户反馈"夹在中间的浅色字很怪"）。端点也只压到 0.5、不至于暗到像缺一格。
+      if (path.loop || L <= 2) {
         char.flowFade = 1;
       } else {
-        const fin = Math.min(1, o.i / FADE);
-        const fout = Math.min(1, (L - 1 - o.i) / FADE);
-        char.flowFade = Math.min(fin, fout);
+        char.flowFade = (o.i === 0 || o.i === L - 1) ? 0.5 : 1;
       }
     }
   }
@@ -842,7 +851,10 @@ export class MotionEngine {
 
     // Candidates: [stay] + [neighbors] — only unoccupied. flow 用 8 邻域（含对角），
     // 让里字能沿细化骨架的斜笔画逐格流动、不靠加粗桥接、保持单薄细线；其余模式仍 4 邻域。
-    const dirs = this._shapeConstraint === 'flow' ? DIRS8 : DIRS;
+    // 骨架细笔画含对角步 → 用 8 邻域让里字沿斜笔画(撇/捺)逐格流动、保持单薄细线；4 连通的
+    // 曲线路径不含对角步(_flowAllowDiag=false) → 仍用 4 邻域，绝不被对角抄近道（曲线维持上
+    // 一版的正交流动、不乱、不重叠）。两者由 setFlowPaths 按路径是否含对角步自动判定。
+    const dirs = (this._shapeConstraint === 'flow' && this._flowAllowDiag) ? DIRS8 : DIRS;
     const cands = [{ x: char.gridX, y: char.gridY, stay: true }];
     for (const d of dirs) {
       const nx = char.gridX + d.dx;
