@@ -26,6 +26,7 @@ import { GestureRecognizer } from './input/gestures.js';
 
 const CELL_SIZE = 11;          // 网格分辨率：实心多排里字定形；格子适中→笔画有 2~3 排里字、复杂字也分得开
 const FONT_SIZE = 10;          // 里字字号：必须 ≤ CELL_SIZE(11) 才不溢出格子；留 1px 余白→相邻里字不糊、清爽不重叠
+const ORIGIN_FONT = 17;        // 原态放大字号（适合阅读）；位图缓存据此超采样
 const TICK_MS = 200;           // 常速 tick —— 匀速铁律（拖动期由引擎自行提速跟手）
 const SCATTER_RESTORE_MS = 2500;
 // 里字自适应 = 螺旋淡入/淡出（沿几条螺旋臂一个接一个，向内淡入/向外淡出）。
@@ -72,14 +73,16 @@ document.addEventListener('DOMContentLoaded', () => {
   // 数百里字时 fillText 是每帧主要开销（卡顿源）；drawImage 走 GPU、快 5~10×。
   const DPR = window.devicePixelRatio || 1;
   const glyphCache = new Map();
+  // 位图缓存按 CELL_SIZE 显示框 + 额外超采样（SS）烘制：原态放大到 ~1.7× 时仍清晰不糊。
+  const GLYPH_SS = Math.max(2, Math.ceil((ORIGIN_FONT / FONT_SIZE) * DPR));
   function getGlyph(ch) {
     let g = glyphCache.get(ch);
     if (g) return g;
     const cv = document.createElement('canvas');
-    cv.width = Math.ceil(CELL_SIZE * DPR);
-    cv.height = Math.ceil(CELL_SIZE * DPR);
+    cv.width = Math.ceil(CELL_SIZE * GLYPH_SS);
+    cv.height = Math.ceil(CELL_SIZE * GLYPH_SS);
     const c = cv.getContext('2d');
-    c.scale(DPR, DPR);
+    c.scale(GLYPH_SS, GLYPH_SS);
     c.font = `${FONT_SIZE}px "PingFang SC", "Microsoft YaHei", sans-serif`;
     c.textAlign = 'center';
     c.textBaseline = 'middle';
@@ -116,6 +119,13 @@ document.addEventListener('DOMContentLoaded', () => {
     { name: '五角星', cells: 96, make: n => shapes.sampleCurveOrdered('star', gridCols, gridRows, n) },
     { name: '无穷',  cells: 96, make: n => shapes.sampleCurveOrdered('lemniscate', gridCols, gridRows, n) },
     { name: '风车',  cells: 110, make: n => shapes.sampleCurveOrdered('pinwheel', gridCols, gridRows, n) },
+    { name: '蝴蝶',  cells: 120, make: n => shapes.sampleCurveOrdered('butterfly', gridCols, gridRows, n) },
+    { name: '李萨如', cells: 110, make: n => shapes.sampleCurveOrdered('lissajous', gridCols, gridRows, n) },
+    { name: '旋轮花', cells: 120, make: n => shapes.sampleCurveOrdered('spiro', gridCols, gridRows, n) },
+    // 静态形状（非巨字，里字钉位定形、不做形状自身动态）：
+    { name: '三角',  make: () => ({ mask: buildTriangleCells(), static: true }) },
+    { name: '六边形', make: () => ({ mask: buildHexagonCells(), static: true }) },
+    { name: '月牙',  make: () => ({ mask: buildCrescentCells(), static: true }) },
     { name: '北京时间', clock: true },   // 即时时分秒：每秒重采样 HH/MM/SS 竖排 → 数字滚动
     // 进阶·动态曲线（里字匀速走格 + 形状自身周期性变化叠加）：
     { name: '正弦波', make: () => ({ mask: buildWaveCells(),   anim: 'wave' }) },
@@ -125,9 +135,8 @@ document.addEventListener('DOMContentLoaded', () => {
     { name: '旋涡',   make: () => ({ mask: buildDiskCells(),   anim: 'vortex' }) },
     { name: '绸缎',   make: () => ({ mask: buildBlockCells(),  anim: 'cloth' }) },
     { name: '脉动花', make: () => ({ mask: buildRoseCells(),   anim: 'bloom' }) },
-    { name: '银河',   make: () => ({ mask: buildSpiralCells(), anim: 'galaxy' }) },   // 新①
-    { name: '摇摆竹帘', make: () => ({ mask: buildVBandsCells(), anim: 'curtain' }) }, // 新②
-    { name: '呼吸',   make: () => ({ mask: buildDiskCells(),   anim: 'breathe' }) },   // 新③
+    { name: '银河',   make: () => ({ mask: buildSpiralCells(), anim: 'galaxy' }) },
+    { name: '摇摆竹帘', make: () => ({ mask: buildVBandsCells(), anim: 'curtain' }) },
   ];
   let shapeIndex = 0;
   let shapeActive = false;
@@ -136,9 +145,35 @@ document.addEventListener('DOMContentLoaded', () => {
   let animDirty = false;        // 用过 anim 亮度乘子 → 离开时需清一次
   let clockTimer = null;        // 北京时间：每秒重采样的定时器
   let lastOriginText = null;    // 最近一次原态文本（长按回归原态时按此内容/顺序还原）
+  const defaultOriginText = '今天已完成三件事还有两项待办慢慢来继续加油';
   let currentPaths = null;      // flow（曲线）的有序路径；strict 时为 null
   let currentCells = [];        // 当前形状占用的格子（strict 掩码 / flow 路径格的并集）
   let currentConstraint = 'flow'; // 'strict'（颜文字/巨字）| 'flow'（曲线）
+
+  // ── 原态↔动态 过渡（显示层驱动）──────────────────────────────────────────
+  // 动态里字很小、直接铺成文本行不利阅读。所以过渡做成：里字先快速排成旋转的圆，再逐个
+  // 优美放大、脱圈飞入正在变长的文本行（放大到适合阅读）；没排进去的还在圆上，圆随之扩大
+  // 避免交叠。反向（原态→动态）则文本里字逐个缩小回圈、再聚为动态形状。整个过程较快。
+  const ORIGIN_CELL = ORIGIN_FONT + 3;    // 原态每字占位（含间距）
+  const ORIGIN_MS = 1100;                 // 过渡时长（较快）
+  let originAnim = null;   // 进行中的过渡：{dir, t, chars:[{c,angle0,exited,ex,ey}], layout, after}
+  let originHold = null;   // 过渡完成后的原态保持：{chars, layout}（显示层渲染放大文本+轻浮动）
+
+  // 居中自动换行的放大文本布局（像素中心点）。n 个字 → 每字 ORIGIN_CELL 宽，行宽自适应居中。
+  function originPixelLayout(n) {
+    const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE, pad = 8;
+    const perRow = Math.max(1, Math.floor((W - pad * 2) / ORIGIN_CELL));
+    const rowsN = Math.ceil(n / perRow);
+    const startY = Math.max(ORIGIN_CELL, (H - rowsN * ORIGIN_CELL) / 2 + ORIGIN_CELL / 2);
+    const pos = [];
+    for (let i = 0; i < n; i++) {
+      const r = Math.floor(i / perRow);
+      const rc = (r === rowsN - 1) ? (n - r * perRow) : perRow;
+      const sx = (W - rc * ORIGIN_CELL) / 2 + ORIGIN_CELL / 2;
+      pos.push({ x: sx + (i - r * perRow) * ORIGIN_CELL, y: startY + r * ORIGIN_CELL });
+    }
+    return pos;
+  }
 
   // ── 里字自适应 = 螺旋淡入/淡出（显示层动画，绕开 PIBT，收束 L4）──────────
   // 新增/消失的里字沿 SPIRAL_ARMS 条螺旋臂"一个接一个"整齐排列：向内运动=淡入
@@ -255,7 +290,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (transit.length === 0 && reformPending) {
       reformPending = false;
-      if (inOrigin) layoutOrigin(true); else reformShape();   // 原态：批次结束后含新字重排文本行
+      reformShape();
     }
   }
 
@@ -276,12 +311,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // flow（曲线）= 沿闭环流动。散开/打断/松手归位、螺旋增减后并入都用它。
   function formCurrent() {
     motion.releaseShape();
+    motion.boostReform();   // 重排提速：里字更快滑到新形状位（到位即恢复常速）
     if (currentConstraint === 'strict') {
       motion.setFlowFill(currentCells, aliveIds());
     } else if (currentConstraint === 'anchored') {
       formAnchored(currentCells);
-    } else if (currentConstraint === 'origin') {
-      layoutOrigin(true);
     } else if (currentPaths) {
       motion.setFlowPaths(currentPaths, aliveIds());
     }
@@ -301,6 +335,8 @@ document.addEventListener('DOMContentLoaded', () => {
   function formSampled(sampled, label = 'shape') {
     stopClock();                 // 切到任何普通形状都停掉时钟定时器
     flushTransit();              // 先收尾上一形状未完成的螺旋过渡（防连切把字卡没）
+    originAnim = null; originHold = null;
+    for (const c of pool.getAll()) c.dispScale = 1;  // 清除原态放大，动态里字恢复常规大小
     shapeActive = true;
     inOrigin = false;
     currentAnim = sampled.anim ? ANIMS[sampled.anim] : null; // 动态曲线开启形状自身动态
@@ -320,12 +356,14 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (sampled.mask && sampled.mask.length > 0) {
       // 颜文字/巨字 → 满填循环流动：里字数 ≈ 掩码格数 × 0.88（留约 12% 缝隙供笔画内
       // 循环流动）。不强行抬到 MIN_CHARS（否则小字形会多出无处安放的里字乱游）。
-      // 动态曲线(anim)→钉位 anchored（不流动，避免颤动/重叠，形状动态由 currentAnim 叠加），
-      // 一字一格(填满 cells)；其余颜文字/巨字→strict 满填循环流动。
-      currentConstraint = sampled.anim ? 'anchored' : 'strict';
+      // 动态曲线(anim)/静态形状(static)→钉位 anchored（不流动，避免颤动/重叠；动态曲线的
+      // 形状自身动态由 currentAnim 叠加，静态形状则保持不动），一字一格(填满 cells)；
+      // 其余颜文字/巨字→strict 满填循环流动。
+      const pinned = !!(sampled.anim || sampled.static);
+      currentConstraint = pinned ? 'anchored' : 'strict';
       currentPaths = null;
       currentCells = sampled.mask;
-      const fillv = sampled.anim ? 1.0 : (sampled.fill != null ? sampled.fill : STRICT_FILL);
+      const fillv = pinned ? 1.0 : (sampled.fill != null ? sampled.fill : STRICT_FILL);
       target = Math.round(sampled.mask.length * fillv);
     } else {
       return;
@@ -426,6 +464,59 @@ document.addEventListener('DOMContentLoaded', () => {
     for (let x = 4; x < gridCols - 4; x += 4) for (let y = m; y < gridRows - m; y++) cells.push({ x, y });
     return cells;
   }
+  // ── 静态形状（非巨字，描边轮廓，里字钉位定形）────────────────────────────
+  // 三角：等边三角形的描边（三条边均匀取点）。
+  function buildTriangleCells() {
+    const cells = [], seen = new Set();
+    const cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2, R = Math.min(gridCols, gridRows) * 0.42;
+    const verts = [0, 1, 2].map(i => {
+      const a = -Math.PI / 2 + i * 2 * Math.PI / 3;
+      return [cx + R * Math.cos(a), cy + R * Math.sin(a)];
+    });
+    const put = (px, py) => {
+      const x = Math.round(px), y = Math.round(py);
+      if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) return;
+      const k = y * gridCols + x; if (seen.has(k)) return; seen.add(k); cells.push({ x, y });
+    };
+    for (let i = 0; i < 3; i++) {
+      const [ax, ay] = verts[i], [bx, by] = verts[(i + 1) % 3];
+      const steps = Math.ceil(Math.hypot(bx - ax, by - ay));
+      for (let s = 0; s <= steps; s++) put(ax + (bx - ax) * s / steps, ay + (by - ay) * s / steps);
+    }
+    return cells;
+  }
+  // 六边形：正六边形描边。
+  function buildHexagonCells() {
+    const cells = [], seen = new Set();
+    const cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2, R = Math.min(gridCols, gridRows) * 0.40;
+    const put = (px, py) => {
+      const x = Math.round(px), y = Math.round(py);
+      if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) return;
+      const k = y * gridCols + x; if (seen.has(k)) return; seen.add(k); cells.push({ x, y });
+    };
+    const verts = [0, 1, 2, 3, 4, 5].map(i => {
+      const a = -Math.PI / 2 + i * Math.PI / 3;
+      return [cx + R * Math.cos(a), cy + R * Math.sin(a)];
+    });
+    for (let i = 0; i < 6; i++) {
+      const [ax, ay] = verts[i], [bx, by] = verts[(i + 1) % 6];
+      const steps = Math.ceil(Math.hypot(bx - ax, by - ay));
+      for (let s = 0; s <= steps; s++) put(ax + (bx - ax) * s / steps, ay + (by - ay) * s / steps);
+    }
+    return cells;
+  }
+  // 月牙：大圆减去偏移的小圆 → 弯月填充。
+  function buildCrescentCells() {
+    const cells = [], cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2;
+    const R = Math.min(gridCols, gridRows) * 0.40, r2 = R * 0.92, ox = R * 0.55;
+    for (let y = 0; y < gridRows; y++) for (let x = 0; x < gridCols; x++) {
+      const inBig = (x - cx) ** 2 + (y - cy) ** 2 <= R * R;
+      const inCut = (x - (cx + ox)) ** 2 + (y - cy) ** 2 <= r2 * r2;
+      if (inBig && !inCut) cells.push({ x, y });
+    }
+    return cells;
+  }
+
   // 银河：两条对数螺旋臂（绕心刚体旋转 → 旋臂卷动）。
   function buildSpiralCells() {
     const cells = [], seen = new Set(), cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2;
@@ -479,12 +570,6 @@ document.addEventListener('DOMContentLoaded', () => {
     },
     // 新②摇摆竖帘：每列整体左右摆（列内同移、列间相位差小 → 0 重叠）→ 风中竹帘。
     curtain: (c, t) => { c.displayX += Math.sin(t * 1.6 + c.gridX * 0.25) * CC() * 2.2; },
-    // 新③呼吸：整体均匀缩放（相似变换 → 0 重叠）+ 亮度同步 → 一呼一吸。
-    breathe: (c, t) => {
-      const { cx, cy } = cen(); const s = 1 + 0.18 * Math.sin(t * 1.6);
-      c.displayX = cx + (c.gridX * CC() - cx) * s; c.displayY = cy + (c.gridY * CC() - cy) * s;
-      c.animA = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(t * 1.6));
-    },
   };
 
   // 调试入口：即时呈现任意巨字(串)/指定颜文字/指定曲线（接入云端 AI 后即用这些）。
@@ -515,87 +600,115 @@ document.addEventListener('DOMContentLoaded', () => {
   // 里字内容不变（动态里的里字本就来自原态文本）；动态↔原态都靠 PIBT 沿格子滑动，匀速美观
   // （华容道式，收束 L4/L29）。长按动态→原态；原态里点/双击/拖动→回到动态形状。
 
-  // 为 n 个里字生成居中文本行格子（每行居中、行距 2 格→像段落；过高则压缩行距/加宽）。
-  function buildTextLineCells(n) {
-    const maxCols = Math.max(6, gridCols - 2);
-    let perRow = Math.min(maxCols, Math.max(8, Math.round(Math.sqrt(n) * 1.7)));
-    let rowsN = Math.ceil(n / perRow);
-    let lineGap = 2;
-    while (rowsN * lineGap > gridRows - 2 && lineGap > 1) lineGap = 1;
-    while (rowsN * lineGap > gridRows - 2 && perRow < maxCols) { perRow++; rowsN = Math.ceil(n / perRow); }
-    const blockH = (rowsN - 1) * lineGap + 1;
-    const startRow = Math.max(1, Math.floor((gridRows - blockH) / 2));
-    const cells = [];
-    for (let i = 0; i < n; i++) {
-      const r = Math.floor(i / perRow);
-      const rowCount = (r === rowsN - 1) ? (n - r * perRow) : perRow; // 该行字数（末行可能不满）
-      const rowStart = Math.max(0, Math.floor((gridCols - rowCount) / 2));
-      const c = i - r * perRow;
-      cells.push({ x: rowStart + c, y: startRow + r * lineGap });
-    }
-    return cells;
-  }
-
-  // 把在册里字钉成居中文本行：按阅读序(y,x)就近配对 → 整体平移/交叉最少（华容道滑入）。
-  // setContent=true 时按 lastOriginText 的字序给每个里字赋内容 → 文本按"原本顺序"呈现。
-  function layoutOrigin(setContent) {
-    const alive = aliveChars();
-    if (alive.length === 0) return;
-    const cells = buildTextLineCells(alive.length);  // 阅读序：左→右、上→下
-    currentConstraint = 'origin'; currentPaths = null; currentCells = cells;
-    const S = alive.slice().sort((a, b) => (a.gridY - b.gridY) || (a.gridX - b.gridX)); // 空间序
-    const content = (setContent && lastOriginText)
-      ? [...String(lastOriginText)].filter(ch => ch.trim().length > 0) : null;
-    // S[k] ↔ cells[k]（两者都是同序的第 k 个）→ 滑动最短；内容按阅读序 content[k] 落到 cells[k]。
-    if (content) for (let k = 0; k < S.length; k++) S[k].char = content[k % content.length];
-    motion.setTextLine(cells, S.map(c => c.id));
-  }
-
-  // 动态 → 原态：回归文本行。若设过原态文本，按其"原本内容/长度"还原 —— 即去掉动态自适应
-  // 多出来的里字（螺旋淡出）、补回缺的，呈现原本那段话，而不是把多出的字也塞进文本行。
+  // 动态 → 原态：先按目标文本调整里字数/内容，再启动"旋转圆→逐个放大飞入文本行"的过渡。
   function enterOrigin() {
-    if (inOrigin) return;
+    if (inOrigin || originAnim) return;
     if (aliveIds().length === 0) return;
-    if (lastOriginText) { formOriginText(lastOriginText); return; }
-    stopClock(); currentAnim = null; flushTransit();
+    stopClock(); currentAnim = null; animDirty = true; flushTransit();
     clearTimeout(scatterTimer);
     if (motion.isOrbiting()) motion.endOrbit();
+    // 内容/长度自适应：去掉动态多出的里字、补回缺的，呈现"原本那段话"。
+    const text = lastOriginText || defaultOriginText;
+    const content = [...String(text)].filter(ch => ch.trim().length > 0);
+    syncCharCountInstant(content.length);
+    const alive = aliveChars();
+    alive.forEach((c, i) => { c.char = content[i % content.length]; });
+    motion.releaseShape();         // 脱离引擎约束，过渡由显示层接管
+    startOriginTransition('toOrigin', alive);
     inOrigin = true; shapeActive = false;
-    layoutOrigin(false);
-    console.log(`→ 原态文本行 (${aliveIds().length} 里字)`);
+    console.log(`→ 原态「${text}」(${alive.length} 里字)`);
   }
 
-  // 原态字数自适应（不抬到 MIN_CHARS）：用螺旋出入场增减里字，finalize 进文本格。
-  function adaptOriginCount(target, cells) {
-    target = Math.min(MAX_CHARS, Math.max(1, target));
-    const diff = target - aliveChars().length;
-    if (diff > 0) spawnSpiralIn(diff, cells);
-    else if (diff < 0) despawnSpiralOut(-diff, cells);
+  // 即时把在册里字数调到 n（过渡用，不走螺旋；多删少补，补的在中心附近、alpha=1）。
+  function syncCharCountInstant(n) {
+    let alive = aliveChars();
+    while (alive.length > n) { const c = alive.pop(); motion.unregisterCharacter(c.id); pool.release(c.id); }
+    const cx = Math.floor(gridCols / 2), cy = Math.floor(gridRows / 2);
+    let k = 0;
+    while (aliveChars().length < n) {
+      const c = pool.acquire('字', (cx + k % 5) % gridCols, (cy + ((k / 5) | 0)) % gridRows);
+      c.alpha = 1; c.animA = 1; motion.registerCharacter(c); k++;
+    }
   }
 
-  // 原态内容/长度自适应（后续由 AI 回答驱动）：里字数按 text 字数螺旋增/减（出入场如螺旋线、
-  // 不瞬变），内容/顺序按 text 还原，钉成居中文本行。螺旋批次结束后再 reapply 一次含新字。
+  // 启动过渡：dir='toOrigin'（圆→放大文本行）或 'toShape'（文本行→缩回圆→交给形状）。
+  function startOriginTransition(dir, alive, after) {
+    const layout = originPixelLayout(alive.length);
+    const chars = alive.map((c, i) => ({ c, idx: i, angle0: (i / alive.length) * Math.PI * 2,
+      exited: false, ex: c.displayX, ey: c.displayY }));
+    originAnim = { dir, t: 0, chars, layout, after };
+    originHold = null;
+  }
+
+  // 每帧推进原态过渡：里字在"旋转圆"和"放大文本行"之间按各自错峰进度平滑插值；圆随已离开
+  // 的里字增多而扩大（避免交叠）。toShape 是 toOrigin 的时间反演。完成后落到 hold 或回调。
+  const easeIO = u => u * u * (3 - 2 * u);
+  function updateOriginTransition(dtMs, now) {
+    const A = originAnim;
+    A.t = Math.min(1, A.t + dtMs / ORIGIN_MS);
+    const g = A.dir === 'toOrigin' ? A.t : 1 - A.t;   // g: 0=全在圆上 … 1=全在文本行
+    const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE, cx = W / 2, cy = H / 2;
+    const N = A.chars.length;
+    const spin = (now / 1000) * 1.7;
+    // 圆半径随成形进度 g 扩大：留在圆上的越少、圈反而越大 → 不交叠、有"扩散"感。
+    const R = Math.min(W, H) * (0.16 + 0.20 * g);
+    const stagger = 0.55;                       // 各字出发时间错峰窗口
+    for (const it of A.chars) {
+      const startG = (it.idx / N) * stagger;
+      const local = Math.max(0, Math.min(1, (g - startG) / (1 - stagger + 1e-6)));
+      const e = easeIO(local);
+      const oAng = it.angle0 + spin;
+      const oX = cx + R * Math.cos(oAng), oY = cy + R * Math.sin(oAng);
+      const tg = A.layout[it.idx];
+      it.c.displayX = oX + (tg.x - oX) * e - CELL_SIZE / 2;
+      it.c.displayY = oY + (tg.y - oY) * e - CELL_SIZE / 2;
+      it.c.dispScale = 1 + (ORIGIN_FONT / FONT_SIZE - 1) * e;  // 1 → 放大；渲染层据此放大字号
+      it.c.alpha = 1; it.c.animA = 1; it.c.flowFade = 1;
+    }
+    if (A.t >= 1) {
+      if (A.dir === 'toOrigin') {
+        originHold = { chars: A.chars, layout: A.layout };
+        originAnim = null;
+      } else {
+        const cb = A.after; originAnim = null;
+        A.chars.forEach(it => { it.c.dispScale = 1; });
+        if (cb) cb();
+      }
+    }
+  }
+
+  // 原态保持：放大文本行静止 + 极轻微整体浮动（生命感）。显示层渲染。
+  function updateOriginHold(now) {
+    const t = now / 1000, ox = Math.sin(t * 0.9) * 1.2, oy = Math.sin(t * 0.7 + 1.2) * 1.5;
+    for (const it of originHold.chars) {
+      const p = originHold.layout[it.idx];
+      it.c.displayX = p.x - CELL_SIZE / 2 + ox;
+      it.c.displayY = p.y - CELL_SIZE / 2 + oy;
+      it.c.dispScale = ORIGIN_FONT / FONT_SIZE;
+      it.c.alpha = 1; it.c.animA = 1; it.c.flowFade = 1;
+    }
+  }
+
+  // 原态内容/长度自适应（后续由 AI 回答驱动）：记下文本并走"圆→放大文本行"过渡呈现。
   function formOriginText(text) {
     const content = [...String(text)].filter(ch => ch.trim().length > 0);
-    const n = content.length;
-    if (n === 0) return;
+    if (content.length === 0) return;
     lastOriginText = text;
-    stopClock(); currentAnim = null; flushTransit();
-    clearTimeout(scatterTimer);
-    if (motion.isOrbiting()) motion.endOrbit();
-    inOrigin = true; shapeActive = false;
-    const cells = buildTextLineCells(n);
-    currentConstraint = 'origin'; currentPaths = null; currentCells = cells;
-    adaptOriginCount(n, cells);   // 螺旋增减到 n（出入场动画）
-    layoutOrigin(true);           // 现有里字即刻按内容/顺序滑向文本位；新字落位后由 reform 再排
-    reformPending = true;
-    console.log(`→ 原态文本「${text}」(${n} 字)`);
+    inOrigin = false; originAnim = null; originHold = null;
+    enterOrigin();
   }
 
-  // 原态 → 动态：回到形状（advance=true 则切下一个）。里字从文本行沿格子滑进字形。
+  // 原态 → 动态：先把放大文本行的里字"缩回旋转圆"，过渡结束后再聚成动态形状。
   function enterShape(advance) {
+    const targetIndex = advance ? shapeIndex + 1 : shapeIndex;
+    if (originHold || inOrigin) {
+      const alive = aliveChars();
+      startOriginTransition('toShape', alive, () => { inOrigin = false; applyShape(targetIndex); });
+      inOrigin = false;
+      return;
+    }
     inOrigin = false;
-    applyShape(advance ? shapeIndex + 1 : shapeIndex);
+    applyShape(targetIndex);
   }
 
   // Reconstrain里字 to the current shape (used after scatter / break restore).
@@ -666,10 +779,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const r2 = row(); r2.append(makeLabel('颜文字'));
     for (const key of Object.keys(EMOJI_TEMPLATES)) r2.append(mkBtn(key, () => applyEmojiKey(key)));
 
-    // 曲线
+    // 曲线（含静态形状）
     const r3 = row(); r3.append(makeLabel('曲线'));
-    const curves = [['心', 'heart'], ['四叶花', 'rose'], ['圆', 'circle'], ['无穷', 'lemniscate'], ['五角星', 'star'], ['风车', 'pinwheel']];
+    const curves = [['心', 'heart'], ['四叶花', 'rose'], ['圆', 'circle'], ['无穷', 'lemniscate'],
+                    ['五角星', 'star'], ['风车', 'pinwheel'], ['蝴蝶', 'butterfly'],
+                    ['李萨如', 'lissajous'], ['旋轮花', 'spiro']];
     for (const [label, type] of curves) r3.append(mkBtn(label, () => applyCurve(type)));
+    const statics = [['三角', buildTriangleCells], ['六边形', buildHexagonCells], ['月牙', buildCrescentCells]];
+    for (const [label, build] of statics)
+      r3.append(mkBtn(label, () => formSampled({ mask: build(), static: true }, label)));
 
     // 动态曲线（形状自身动态）
     const r6 = row(); r6.append(makeLabel('动态曲线'));
@@ -677,7 +795,7 @@ document.addEventListener('DOMContentLoaded', () => {
                    ['DNA双螺旋', 'dna', buildVBandsCells], ['涟漪', 'pulse', buildDiskCells],
                    ['旋涡', 'vortex', buildDiskCells], ['绸缎', 'cloth', buildBlockCells],
                    ['脉动花', 'bloom', buildRoseCells], ['银河', 'galaxy', buildSpiralCells],
-                   ['摇摆竹帘', 'curtain', buildVBandsCells], ['呼吸', 'breathe', buildDiskCells]];
+                   ['摇摆竹帘', 'curtain', buildVBandsCells]];
     for (const [label, anim, build] of anims)
       r6.append(mkBtn(label, () => formSampled({ mask: build(), anim }, label)));
 
@@ -729,7 +847,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const gestures = new GestureRecognizer(renderer.canvas, CELL_SIZE, {
     onTap(col, row) {
-      if (inOrigin) { triggerMicro(); enterShape(false); return; } // 原态→动态
+      if (originAnim) return;                                       // 过渡中不打断
+      if (inOrigin || originHold) { triggerMicro(); enterShape(false); return; } // 原态→动态
       if (!shapeActive) return;
       clearTimeout(scatterTimer);
       triggerMicro(); // 点击伴随的微动反应（全体一起轻摆一下）
@@ -748,21 +867,23 @@ document.addEventListener('DOMContentLoaded', () => {
     },
 
     onDoubleTap() {
+      if (originAnim) return;
       triggerMicro();
-      if (inOrigin) { enterShape(false); return; } // 原态→动态（回到当前形状）
+      if (inOrigin || originHold) { enterShape(false); return; } // 原态→动态（回到当前形状）
       applyShape(shapeIndex + 1);                   // 动态→切下一个形状
     },
 
     onLongPress() {
       // 长按：动态→回归原态文本行。阈值 650ms + 任意 >8px 移动即转为拖动 → 拖着玩不会误触。
-      if (inOrigin) return;
+      if (inOrigin || originHold || originAnim) return;
       enterOrigin();
     },
 
     // 拖动（收束 L30）：里字聚成方形，按同心方环逐层旋转、越拖越快；中心=手指、
     // 整块跟手平移；松手在落点还原之前的形状。由显示层驱动（见渲染循环）。
     onDragStart(col, row, px, py) {
-      if (inOrigin) enterShape(false); // 原态→动态，随即跟手环绕
+      if (originAnim) { originAnim = null; } // 拖动打断过渡，直接接管
+      if (inOrigin || originHold) { inOrigin = false; originHold = null; } // 原态→拖动：直接跟手环绕
       dragging = true;
       dragEnd = { col, row };
       orbitFinger = { x: px, y: py };
@@ -809,23 +930,18 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     renderer.clear();
-    if (motion.isOrbiting()) {
+    if (originAnim) {
+      // 原态↔动态过渡：显示层直接驱动（旋转圆 ↔ 放大文本行），绕开 PIBT。
+      updateOriginTransition(dtMs, now);
+    } else if (originHold) {
+      // 原态保持：放大文本行 + 轻浮动。
+      updateOriginHold(now);
+    } else if (motion.isOrbiting()) {
       // 拖动环绕：显示层直接驱动（连续旋转 + 整块跟手平移），绕开 PIBT。
       motion.updateOrbitDisplay(dtMs, orbitFinger.x, orbitFinger.y);
     } else {
       motion.update(dtMs);
       motion.updateDisplayPositions(motion.tickProgress);
-      if (inOrigin) {
-        // 原态浮动用"全体同一偏移"（呼吸般整体轻摆）→ 每行里字始终对齐、不再参差不齐，
-        // 又有生命感（收束 L28）。新生里字(AI 新文本)淡入。
-        const t = now / 1000;
-        const ox = Math.sin(t * 0.9) * 1.0;
-        const oy = Math.sin(t * 0.7 + 1.2) * 1.3;
-        for (const c of aliveChars()) {
-          c.displayX += ox; c.displayY += oy;
-          if (c.alpha < 1) c.alpha = Math.min(1, c.alpha + dtMs / 320);
-        }
-      }
       if (currentAnim) {
         // 进阶·形状自身动态：钉位里字 + 在显示层叠加位移/亮度(形状自身动态)。animA=亮度乘子。
         const t = now / 1000;
@@ -860,8 +976,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
         const my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
         ctx.globalAlpha = eff;
+        // 原态过渡/保持时 dispScale>1 → 放大绘制（以格中心为中心放大），便于阅读。
+        const sc = char.dispScale != null ? char.dispScale : 1;
+        const sz = CELL_SIZE * sc, off = (sz - CELL_SIZE) / 2;
         ctx.drawImage(getGlyph(char.char),
-          char.displayX + mx, char.displayY + my, CELL_SIZE, CELL_SIZE);
+          char.displayX + mx - off, char.displayY + my - off, sz, sz);
       }
     }
     ctx.globalAlpha = 1;

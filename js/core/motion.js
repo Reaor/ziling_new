@@ -39,6 +39,8 @@ export class MotionEngine {
     // 拖动这一"模态"整体走得更快），让里字能跟手追上被拖去的位置；松手后
     // 在动量衰减期间平滑回落到常速。详见 _effectiveTick()。
     this.dragTickDuration = 85;
+    this.reformTickDuration = 95;  // 形状重排提速时的 tick（比常速 200 快约一倍）
+    this._reformBoostMs = 0;       // >0 时启用重排提速，逐帧递减
     this._dragActive = false;
     this.accumulatedTime = 0;
     this.tickProgress = 0;
@@ -672,6 +674,7 @@ export class MotionEngine {
         this._dragMomentum = false;
       }
     }
+    if (this._reformBoostMs > 0) this._reformBoostMs -= deltaTime;
     const tick = this._effectiveTick();
     this.accumulatedTime += deltaTime;
     let ticks = 0;
@@ -700,8 +703,14 @@ export class MotionEngine {
       const s = Math.max(0, Math.min(1, this.dragBias.strength));
       return this.dragTickDuration + (this.tickDuration - this.dragTickDuration) * (1 - s);
     }
+    // 形状变换重排提速：成形/切换后短时间内 tick 更短（里字更快滑到新位），到位即恢复常速
+    // （形状内的常态运动速率不变）。
+    if (this._reformBoostMs > 0) return this.reformTickDuration;
     return this.tickDuration;
   }
+
+  /** 触发一次形状重排提速（持续 ms 毫秒，期间里字滑动更快）。 */
+  boostReform(ms = 1100) { this._reformBoostMs = ms; }
 
   updateDisplayPositions(progress) {
     const cs = this.cellSize;

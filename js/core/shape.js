@@ -290,6 +290,22 @@ export class ShapeSystem {
         const sw = t + 0.9 * (r / scale); // 漩涡偏转角
         x = cx + r * Math.cos(sw);
         y = cy + r * Math.sin(sw);
+      } else if (type === 'butterfly') {
+        // 蝴蝶曲线（Temple Fay）：r = e^{sinθ} - 2cos4θ + sin^5((2θ-π)/24)
+        const k = scale * 0.34;
+        const r = Math.exp(Math.sin(t)) - 2 * Math.cos(4 * t)
+                + Math.pow(Math.sin((2 * t - Math.PI) / 24), 5);
+        x = cx + k * r * Math.sin(t);
+        y = cy - k * r * Math.cos(t);
+      } else if (type === 'lissajous') {
+        // 李萨如曲线（3:2，相位差 π/2）→ 优雅的交织环带
+        x = cx + scale * Math.sin(3 * t + Math.PI / 2);
+        y = cy + scale * Math.sin(2 * t);
+      } else if (type === 'spiro') {
+        // 内旋轮线（hypotrochoid，R=5,r=2,d=3）：t∈[0,2π] 内走 3 圈正好闭合 → 三瓣旋轮花纹
+        const R = 5, rr = 2, d = 3, kk = scale / 5.2, f = (R - rr) / rr, tt = t * rr;
+        x = cx + kk * ((R - rr) * Math.cos(tt) + d * Math.cos(f * tt));
+        y = cy + kk * ((R - rr) * Math.sin(tt) - d * Math.sin(f * tt));
       } else {
         x = cx + scale * Math.cos(t);
         y = cy + scale * Math.sin(t);
