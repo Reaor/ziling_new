@@ -111,10 +111,16 @@ document.addEventListener('DOMContentLoaded', () => {
     { name: '春',   cells: 340, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
     { name: '爱心', cells: 80,  make: n => shapes.sampleCurveOrdered('heart', gridCols, gridRows, n) },
     { name: '四叶花', cells: 96, make: n => shapes.sampleCurveOrdered('rose', gridCols, gridRows, n) },
+    { name: '五角星', cells: 96, make: n => shapes.sampleCurveOrdered('star', gridCols, gridRows, n) },
+    { name: '无穷',  cells: 96, make: n => shapes.sampleCurveOrdered('lemniscate', gridCols, gridRows, n) },
+    { name: '北京时间', clock: true },   // 即时时分秒：每秒重采样时间字串 → 数字滚动呈现
+    { name: '正弦波', wave: true, make: () => ({ mask: buildWaveCells(), constraint: 'strict', fill: 0.92, wave: true }) },
   ];
   let shapeIndex = 0;
   let shapeActive = false;
   let inOrigin = false;         // 原态（文本行）态：长按进入；点/双击/拖动回到动态形状
+  let waveAnim = false;         // 正弦波：形状自身起伏动画（显示层）
+  let clockTimer = null;        // 北京时间：每秒重采样的定时器
   let currentPaths = null;      // flow（曲线）的有序路径；strict 时为 null
   let currentCells = [];        // 当前形状占用的格子（strict 掩码 / flow 路径格的并集）
   let currentConstraint = 'flow'; // 'strict'（颜文字/巨字）| 'flow'（曲线）
@@ -249,7 +255,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 把一份采样结果（mask 或 paths）成形。供双击循环、调试面板任意字/颜文字/曲线共用。
   function formSampled(sampled, label = 'shape') {
+    stopClock();                 // 切到任何普通形状都停掉时钟定时器
     shapeActive = true;
+    inOrigin = false;
+    waveAnim = !!sampled.wave;    // 仅"正弦波"开启形状自身起伏
     let target = 0;
     if (sampled.paths && sampled.paths.length > 0) {
       // 曲线/数学曲线 → flow 沿线流动。闭环近乎全覆盖、开放笔画留空位供流动。
@@ -283,7 +292,39 @@ document.addEventListener('DOMContentLoaded', () => {
   function applyShape(index) {
     shapeIndex = ((index % SHAPES.length) + SHAPES.length) % SHAPES.length;
     const def = SHAPES[shapeIndex];
+    if (def.clock) { applyClock(); return; }
     formSampled(def.make(def.cells), def.name);
+  }
+
+  // ── 北京时间（即时时分秒）──────────────────────────────────────────────
+  // 每秒把 "HH:MM:SS" 当作横排巨字串重采样成掩码并满填流动；数字变化→里字滚动呈现。
+  // 仅当掩码格数变化较大时才走螺旋增减，避免每秒抖动。
+  function beijingTimeString() {
+    const now = new Date();
+    const bj = new Date(now.getTime() + (now.getTimezoneOffset() + 480) * 60000); // UTC+8
+    const p = x => String(x).padStart(2, '0');
+    return `${p(bj.getHours())}:${p(bj.getMinutes())}:${p(bj.getSeconds())}`;
+  }
+  function stopClock() { if (clockTimer) { clearInterval(clockTimer); clockTimer = null; } }
+  function applyClock() {
+    stopClock();
+    shapeActive = true; inOrigin = false; waveAnim = false;
+    const tick = () => {
+      const sampled = shapes.sampleMegachar(beijingTimeString(), gridCols, gridRows, MAX_CHARS);
+      currentConstraint = 'strict'; currentPaths = null; currentCells = sampled.mask;
+      const target = Math.round(sampled.mask.length * (sampled.fill != null ? sampled.fill : STRICT_FILL));
+      if (Math.abs(target - aliveChars().length) > 8) adaptCharCount(target, currentCells);
+      motion.setFlowFill(currentCells, aliveIds());
+    };
+    tick();
+    clockTimer = setInterval(tick, 1000);
+  }
+
+  // 横向带状（正弦波底形）：中间几行满宽 → 里字满填流动，叠加显示层正弦起伏成行波。
+  function buildWaveCells() {
+    const cells = [], midY = Math.floor(gridRows / 2), m = 2;
+    for (let x = m; x < gridCols - m; x++) for (let dy = -1; dy <= 1; dy++) cells.push({ x, y: midY + dy });
+    return cells;
   }
 
   // 调试入口：即时呈现任意巨字(串)/指定颜文字/指定曲线（接入云端 AI 后即用这些）。
@@ -333,9 +374,10 @@ document.addEventListener('DOMContentLoaded', () => {
     return cells;
   }
 
-  // 动态 → 原态：把在册里字钉成文本行。
+  // 动态 → 原态：把在册里字钉成文本行（内容不变，沿用当前里字）。
   function enterOrigin() {
     if (inOrigin) return;
+    stopClock(); waveAnim = false;
     clearTimeout(scatterTimer);
     if (motion.isOrbiting()) motion.endOrbit();
     const ids = aliveIds();
@@ -345,6 +387,33 @@ document.addEventListener('DOMContentLoaded', () => {
     inOrigin = true;
     shapeActive = false;
     console.log(`→ 原态文本行 (${ids.length} 里字)`);
+  }
+
+  // 原态内容/长度自适应（后续由 AI 回答驱动）：把里字增减到 text 的字数、设其内容为 text，
+  // 再钉成居中文本行。新增里字在中部淡入、沿格滑到位；多余里字回收。
+  function formOriginText(text) {
+    const content = [...String(text)].filter(ch => ch.trim().length > 0);
+    const n = content.length;
+    if (n === 0) return;
+    stopClock(); waveAnim = false;
+    clearTimeout(scatterTimer);
+    if (motion.isOrbiting()) motion.endOrbit();
+    let alive = aliveChars();
+    // 多了→回收；少了→在中部不同格子生成（alpha 0 淡入）。
+    while (alive.length > n) { const c = alive.pop(); motion.unregisterCharacter(c.id); pool.release(c.id); }
+    let need = n - alive.length;
+    const cx = Math.floor(gridCols / 2), cy = Math.floor(gridRows / 2);
+    for (let k = 0; k < need; k++) {
+      const c = pool.acquire(content[0], (cx + k % 7) % gridCols, (cy + ((k / 7) | 0)) % gridRows);
+      c.alpha = 0;
+      motion.registerCharacter(c);
+    }
+    alive = aliveChars();
+    alive.forEach((c, i) => { c.char = content[i] || content[content.length - 1]; });
+    const cells = buildTextLineCells(alive.length);
+    motion.setTextLine(cells, alive.map(c => c.id));
+    inOrigin = true; shapeActive = false;
+    console.log(`→ 原态文本「${text}」(${alive.length} 里字)`);
   }
 
   // 原态 → 动态：回到形状（advance=true 则切下一个）。里字从文本行沿格子滑进字形。
@@ -375,8 +444,8 @@ document.addEventListener('DOMContentLoaded', () => {
     formCurrent();
   }
 
-  // 初次进入先呈现原态文本行（收束 L5）；点/双击/拖动即进入动态形状。
-  setTimeout(() => enterOrigin(), 800);
+  // 初次进入先呈现原态文本行（收束 L5；内容/长度自适应，后续由 AI 回答驱动）。
+  setTimeout(() => formOriginText('今天已完成三件事还有两项待办慢慢来继续加油'), 800);
 
   // ── 调试面板（网页快捷查验：任意巨字 / 全部颜文字 / 曲线）─────────────────
   // 接入云端 AI 后即用 applyMegachar/applyEmojiKey 这些入口即时呈现任意字。
@@ -426,12 +495,25 @@ document.addEventListener('DOMContentLoaded', () => {
     const curves = [['心', 'heart'], ['四叶花', 'rose'], ['圆', 'circle'], ['无穷', 'lemniscate'], ['五角星', 'star']];
     for (const [label, type] of curves) r3.append(mkBtn(label, () => applyCurve(type)));
 
+    // 原态文本（内容/长度自适应，模拟 AI 回答）
+    const r5 = row(); r5.append(makeLabel('原态'));
+    const tin = document.createElement('input');
+    tin.type = 'text'; tin.value = '今天完成得不错继续加油'; tin.maxLength = 60;
+    tin.style.cssText = 'width:150px;padding:5px;border-radius:6px;border:1px solid #3c4f76;'
+      + 'background:#0d1320;color:#fff;font-size:14px;';
+    tin.addEventListener('pointerdown', stop);
+    tin.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') formOriginText(tin.value); });
+    r5.append(tin, mkBtn('呈现原态', () => formOriginText(tin.value)));
+
     // 杂项
     const r4 = row();
+    r4.append(mkBtn('北京时间', () => applyClock()));
+    r4.append(mkBtn('正弦波', () => formSampled({ mask: buildWaveCells(), constraint: 'strict', fill: 0.92, wave: true }, '正弦波')));
     r4.append(mkBtn('下一个形状', () => applyShape(shapeIndex + 1)));
+    r4.append(mkBtn('回归原态', () => enterOrigin()));
     r4.append(mkBtn('自由漫游', () => releaseShape()));
 
-    body.append(r1, r2, r3, r4);
+    body.append(r1, r2, r3, r5, r4);
 
     const toggle = mkBtn('调试 ⚙', () => {
       body.style.display = body.style.display === 'none' ? 'flex' : 'none';
@@ -549,11 +631,22 @@ document.addEventListener('DOMContentLoaded', () => {
       motion.update(dtMs);
       motion.updateDisplayPositions(motion.tickProgress);
       if (inOrigin) {
-        // 原态轻微浮动（收束 L28）：每字按 id 错相做极小幅正弦摆动 → 文本行有生命感但仍易读。
+        // 原态浮动用"全体同一偏移"（呼吸般整体轻摆）→ 每行里字始终对齐、不再参差不齐，
+        // 又有生命感（收束 L28）。新生里字(AI 新文本)淡入。
+        const t = now / 1000;
+        const ox = Math.sin(t * 0.9) * 1.0;
+        const oy = Math.sin(t * 0.7 + 1.2) * 1.3;
+        for (const c of aliveChars()) {
+          c.displayX += ox; c.displayY += oy;
+          if (c.alpha < 1) c.alpha = Math.min(1, c.alpha + dtMs / 320);
+        }
+      }
+      if (waveAnim) {
+        // 进阶：形状自身动态——里字仍在带状里匀速走格，整条带按 gridX 相位做正弦起伏 → 一条
+        // 行进的正弦波纹（里字动态 + 形状自身动态叠加）。用 gridX 定相位→平滑行波、不抖。
         const t = now / 1000;
         for (const c of aliveChars()) {
-          c.displayX += Math.sin(t * 1.3 + c.id * 0.7) * 1.1;
-          c.displayY += Math.cos(t * 1.0 + c.id * 1.3) * 1.1;
+          c.displayY += Math.sin(c.gridX * 0.5 + t * 2.2) * (CELL_SIZE * 1.8);
         }
       }
     }
