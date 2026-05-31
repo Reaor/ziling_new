@@ -147,6 +147,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let shapeActive = false;
   let inOrigin = false;         // 原态（文本行）态：长按进入；点/双击/拖动回到动态形状
   let currentAnim = null;       // 动态曲线的"形状自身动态"函数 (char,t)=>void（显示层）；无则 null
+  let currentDragon = false;    // 飞龙模式：里字按身体参数 u 排在会飞的龙身上（需逐帧前 tag）
   let animDirty = false;        // 用过 anim 亮度乘子 → 离开时需清一次
   let clockTimer = null;        // 北京时间：每秒重采样的定时器
   let lastOriginText = null;    // 最近一次原态文本（长按回归原态时按此内容/顺序还原）
@@ -321,6 +322,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function formCurrent() {
     motion.releaseShape();
     motion.boostReform();   // 重排提速：里字更快滑到新形状位（到位即恢复常速）
+    if (currentDragon) { tagDragon(aliveChars()); return; }   // 飞龙：里字由显示层排上龙身，不入引擎约束
     if (currentConstraint === 'strict') {
       motion.setFlowFill(currentCells, aliveIds());
     } else if (currentConstraint === 'anchored') {
@@ -350,6 +352,7 @@ document.addEventListener('DOMContentLoaded', () => {
     shapeActive = true;
     inOrigin = false;
     currentAnim = sampled.anim ? ANIMS[sampled.anim] : null; // 动态曲线开启形状自身动态
+    currentDragon = !!sampled.dragon;
     if (currentAnim) animDirty = true;
     let target = 0;
     if (sampled.paths && sampled.paths.length > 0) {
@@ -609,7 +612,66 @@ document.addEventListener('DOMContentLoaded', () => {
       const W = gridCols * CELL_SIZE;
       rotateDisp(c, { cx: W / 2, cy: gridRows * CELL_SIZE * 0.12 }, Math.sin(t * 1.5) * 0.5);
     },
+    // ── 物理规律动态 ───────────────────────────────────────────────────────
+    // 摆群波（pendulum wave）：每列像不同摆长的单摆，摆动频率随列号递减 → 整体呈现行进/汇聚
+    //   的波形干涉之美（科普馆经典装置）。仅横向位移、各列相位连续 → 不重叠。
+    pendwave: (c, t) => {
+      const freq = 1.0 + c.gridX * 0.06;            // 列号越大摆得越慢
+      c.displayX += Math.sin(t * freq) * CC() * 2.0;
+    },
+    // 重力弹跳（gravity bounce）：每列里字像自由落体 + 触地反弹的小球，列间相位错开 → 一排
+    //   接力跳动，符合抛体/反弹的物理节奏。仅纵向位移。
+    bounce: (c, t) => {
+      const period = 1.6, ph = ((t / period + c.gridX * 0.08) % 1 + 1) % 1; // 0→1 一个落-弹周期
+      const h = 1 - Math.abs(2 * ph - 1);           // 三角波：0→1→0
+      const height = (1 - (1 - h) * (1 - h));        // 顶部慢、底部快（近似重力）
+      c.displayY -= height * CC() * 5.0;             // 始终从基线向上弹起
+    },
+    // 行星轨道（orbit）：里字按到中心的半径分层，各层像行星"内快外慢"(开普勒近似)绕心公转
+    //   → 一圈圈不同速的同心轨道。按半径给绝对公转角（显示位每帧由流动重置→绝对角即连续公转）。
+    orbit: (c, t) => {
+      const C = cen(), dx = c.displayX + CELL_SIZE / 2 - C.cx, dy = c.displayY + CELL_SIZE / 2 - C.cy;
+      const r = Math.hypot(dx, dy) || 1;
+      const omega = 9.0 / (r / CC() + 2.0);   // 半径越大角速度越小（开普勒近似）
+      rotateDisp(c, C, t * omega * 0.12);
+    },
+    // 飞龙：把里字按身体参数 u(头→尾) 摆到一条"会飞的蛇形身躯"上。头沿莉萨如路径在画面里飞来
+    //   飞去，身体以时间延迟跟随（节节相随）+ 沿切线法向的蛇形摆动 → 一条游动的龙。head 略大、
+    //   躯干两侧加厚成"身躯"。完全由显示层定位（像心形曲线那样，龙身本身即运动）。
+    dragon: (c, t) => {
+      const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE;
+      const u = c.dragonU != null ? c.dragonU : 0;     // 0=头 1=尾
+      const head = dragonPath(t), tan = dragonPath(t + 0.001 * DRAGON_LAG);
+      const bt = t - u * DRAGON_LAG;                    // 身体节延迟跟随
+      const p = dragonPath(bt), p2 = dragonPath(bt + 0.02);
+      let tx = p2.x - p.x, ty = p2.y - p.y; const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;
+      const nx = -ty, ny = tx;                          // 法向
+      const wig = Math.sin(bt * 6 + u * 10) * CC() * 1.6 * (0.4 + 0.6 * u); // 蛇形摆动（尾摆大）
+      const thick = (c.dragonW || 0) * CC() * (1.1 - 0.7 * u);             // 身躯厚度（头粗尾细）
+      c.displayX = p.x + nx * (wig + thick) - CELL_SIZE / 2;
+      c.displayY = p.y + ny * (wig + thick) - CELL_SIZE / 2;
+      c.dispScale = 1.35 - 0.5 * u;                     // 头大尾小
+      c.alpha = 1; c.animA = 1; c.flowFade = 1;
+    },
   };
+  // 龙头飞行路径（莉萨如）：在画面安全区内来回飞，避免贴边。
+  const DRAGON_LAG = 2.6;   // 头尾时间差（秒）→ 身体长度感
+  function dragonPath(tt) {
+    const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE;
+    return {
+      x: W / 2 + Math.sin(tt * 0.55) * W * 0.34,
+      y: H / 2 + Math.sin(tt * 0.85 + 1.0) * H * 0.30,
+    };
+  }
+  // 给一组里字标注身体参数：按 id 稳定排序 → u=头→尾；同时给少量两侧厚度 dragonW(−1/0/+1)。
+  function tagDragon(cs) {
+    const arr = cs.slice().sort((a, b) => a.id - b.id);
+    const n = arr.length;
+    arr.forEach((c, i) => {
+      c.dragonU = n > 1 ? i / (n - 1) : 0;
+      c.dragonW = (i % 3) - 1;     // -1/0/1 → 身躯三股厚度
+    });
+  }
   // 把里字的显示位（含内部游动）绕 (cx,cy) 旋转 ang —— 旋转作用在"已含华容道游动的位置"上，
   // 故内部里字的常态运动被完整保留，整体又在转/摆/扭。以格中心为基准旋转后再换回左上角。
   function rotateDisp(c, ctr, ang) {
@@ -657,7 +719,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function enterOrigin() {
     if (inOrigin || originAnim) return;
     if (aliveIds().length === 0) return;
-    stopClock(); currentAnim = null; animDirty = true; flushTransit();
+    stopClock(); currentAnim = null; currentDragon = false; animDirty = true; flushTransit();
     clearTimeout(scatterTimer);
     if (motion.isOrbiting()) motion.endOrbit();
     // 内容/长度自适应：去掉动态多出的里字、补回缺的，呈现"原本那段话"。
@@ -702,18 +764,20 @@ document.addEventListener('DOMContentLoaded', () => {
     return { slot, maxRing, order };
   }
 
-  // 启动过渡：dir='toOrigin'（聚成"同心方环旋转团"→外圈里字逐个飞出排成放大文本行）或 'toShape'（反演）。
+  // 启动过渡：dir='toOrigin'（聚成"同心方环旋转团"→外圈里字逐个飞出排成放大文本行）；
+  // dir='toShape'（放大文本里字逐个收回、汇聚到旋转方环团，随后交由常态流动散入动态形状）。
   function startOriginTransition(dir, alive, after) {
     const L = originPixelLayout(alive.length);
     const W = gridCols * CELL_SIZE;
     const ring = squareRings(alive.length);
     const clusterR = (ring.maxRing + 1) * CLUSTER_CELL;
     const clusterC = { x: W / 2, y: Math.max(clusterR + 8, L.textTopY - clusterR - 12) };
-    // emitRank：该里字在"逐个飞出"队列里的次序（0=最先，外圈优先）。
+    // emitRank：该里字在"逐个飞出/收回"队列里的次序（0=最先，外圈优先）。
     const emitRank = new Array(alive.length);
     ring.order.forEach((slotIdx, rank) => { emitRank[slotIdx] = rank; });
     const chars = alive.map((c, i) => ({ c, idx: i, slot: ring.slot[i], rank: emitRank[i],
-      sx: c.displayX + CELL_SIZE / 2, sy: c.displayY + CELL_SIZE / 2 }));
+      sx: c.displayX + CELL_SIZE / 2, sy: c.displayY + CELL_SIZE / 2, // 过渡起始显示位
+      depX: 0, depY: 0, departed: false }));                         // 飞出时冻结的离场点
     originAnim = { dir, t: 0, chars, layout: L.pos, clusterC, clusterR, after, phase: 0, N: alive.length };
     originHold = null;
   }
@@ -727,37 +791,88 @@ document.addEventListener('DOMContentLoaded', () => {
     return { x: cc.x + (rad * c) / m, y: cc.y + (rad * s) / m };
   }
 
-  // 每帧推进过渡。f：0=动态侧 1=文本侧。前 GATHER 段：里字从原位置按常态般滑入"旋转方环团"；
-  // 其后逐个（外圈优先、错峰，后一个等前一个走到一半再出发）从所在环位**放大飞出**到文本位。
-  // 方环旋转随飞出进度**逐步加速**。toShape = 时间反演（f:1→0），结束回调再聚成形状。
   const easeIO = u => u * u * (3 - 2 * u);
+
+  // 每帧推进过渡。
+  // toOrigin：里字先随常态滑入旋转方环团；随后**外圈优先、错峰逐个飞出**——每个字从它离开方环
+  //   的那一刻**冻结离场点**，再沿各自直线（因转到不同角度→路线各异）放大飞到文本位；后一个等
+  //   前一个走到一半才出发；方环旋转随飞出进度加速。
+  // toShape：放大文本里字**逐个收回**、汇聚到旋转方环团（缩小、汇入正在转的环上）；全部归位后
+  //   把里字网格位同步到团内显示位，交给 applyShape → 常态满填流动把它们散入动态形状（其他新增
+  //   里字此时螺旋入场）——即"方环里字像平常那样聚散成形"，不再突兀。
   function updateOriginTransition(dtMs, now) {
     const A = originAnim;
     A.t = Math.min(1, A.t + dtMs / ORIGIN_MS);
-    const f = A.dir === 'toOrigin' ? A.t : 1 - A.t;
-    const N = A.N;
-    const GATHER = 0.26;
-    const gather = easeIO(Math.min(1, f / GATHER));
-    const emitG = Math.max(0, (f - GATHER) / (1 - GATHER));   // 全局飞出进度 0→1
-    A.phase += dtMs / 1000 * (0.8 + 3.0 * emitG);             // 飞出越多转越快
-    const cc = A.clusterC;
-    // 错峰：每字飞出占 SPAN 比例时长，后一个在前一个走过 STEP 比例后出发（"走到一半再跟上"）。
-    const SPAN = 0.42, STEP = (1 - SPAN) / Math.max(1, N - 1);
-    for (const it of A.chars) {
-      const rp = ringPos(it.slot, A.phase, cc);            // 当前环位（随团旋转）
-      // 聚团：原位 → 环位（gather）。飞出前一直待在旋转环位上。
-      const ancX = it.sx + (rp.x - it.sx) * gather, ancY = it.sy + (rp.y - it.sy) * gather;
-      const startE = it.rank * STEP;
-      const e = easeIO(Math.max(0, Math.min(1, (emitG - startE) / SPAN)));
-      const tg = A.layout[it.idx];
-      it.c.displayX = (ancX + (tg.x - ancX) * e) - CELL_SIZE / 2;
-      it.c.displayY = (ancY + (tg.y - ancY) * e) - CELL_SIZE / 2;
-      it.c.dispScale = 1 + (ORIGIN_FONT / FONT_SIZE - 1) * e;
-      it.c.alpha = 1; it.c.animA = 1; it.c.flowFade = 1;
+    const N = A.N, cc = A.clusterC;
+    // 错峰：后一个在前一个走过约一半时出发（"走到一半再跟上"）；SPAN 自适应使整批恰好铺满。
+    const SPAN = Math.min(0.5, 2 / (N + 1)), STEP = SPAN / 2;
+    const totalSpan = SPAN + STEP * Math.max(0, N - 1);
+
+    if (A.dir === 'toOrigin') {
+      const GATHER = 0.24;
+      const gather = easeIO(Math.min(1, A.t / GATHER));
+      const emitG = Math.max(0, (A.t - GATHER) / (1 - GATHER)) * totalSpan;
+      A.phase += dtMs / 1000 * (0.8 + 3.0 * Math.min(1, emitG / totalSpan));
+      for (const it of A.chars) {
+        const rp = ringPos(it.slot, A.phase, cc);
+        const le = Math.max(0, Math.min(1, (emitG - it.rank * STEP) / SPAN));
+        if (le <= 0) {
+          // 尚未飞出：随常态从起始位滑入旋转环位（停在转动的方环上）。
+          it.c.displayX = (it.sx + (rp.x - it.sx) * gather) - CELL_SIZE / 2;
+          it.c.displayY = (it.sy + (rp.y - it.sy) * gather) - CELL_SIZE / 2;
+          it.c.dispScale = 1;
+        } else {
+          if (!it.departed) { it.departed = true; it.depX = rp.x; it.depY = rp.y; } // 冻结离场点
+          const e = easeIO(le), tg = A.layout[it.idx];
+          it.c.displayX = (it.depX + (tg.x - it.depX) * e) - CELL_SIZE / 2;
+          it.c.displayY = (it.depY + (tg.y - it.depY) * e) - CELL_SIZE / 2;
+          it.c.dispScale = 1 + (ORIGIN_FONT / FONT_SIZE - 1) * e;
+        }
+        it.c.alpha = 1; it.c.animA = 1; it.c.flowFade = 1;
+      }
+      if (A.t >= 1) { originHold = { chars: A.chars, layout: A.layout }; originAnim = null; }
+    } else {
+      // toShape：收回。rs：每字收回进度 0→1（外圈优先）。位置 = 文本位 → 当前(转动)环位。
+      A.phase += dtMs / 1000 * 2.4;
+      const prog = A.t * totalSpan;
+      for (const it of A.chars) {
+        const rp = ringPos(it.slot, A.phase, cc);
+        const rs = easeIO(Math.max(0, Math.min(1, (prog - it.rank * STEP) / SPAN)));
+        const tg = A.layout[it.idx];
+        it.c.displayX = (tg.x + (rp.x - tg.x) * rs) - CELL_SIZE / 2;
+        it.c.displayY = (tg.y + (rp.y - tg.y) * rs) - CELL_SIZE / 2;
+        it.c.dispScale = (ORIGIN_FONT / FONT_SIZE) + (1 - ORIGIN_FONT / FONT_SIZE) * rs; // 大→1
+        it.c.alpha = 1; it.c.animA = 1; it.c.flowFade = 1;
+      }
+      if (A.t >= 1) {
+        // 全部汇入方环团 → 网格位同步到团内显示位 → 交常态流动散入形状（不突兀）。
+        const cb = A.after;
+        A.chars.forEach(it => { it.c.dispScale = 1; });
+        syncGridToDisplay(A.chars.map(it => it.c));
+        originAnim = null;
+        if (cb) cb();
+      }
     }
-    if (A.t >= 1) {
-      if (A.dir === 'toOrigin') { originHold = { chars: A.chars, layout: A.layout }; originAnim = null; }
-      else { const cb = A.after; originAnim = null; A.chars.forEach(it => { it.c.dispScale = 1; }); if (cb) cb(); }
+  }
+
+  // 把一组里字的网格位对齐到各自当前显示位（就近去重），让随后的常态流动从"团内"平滑散开。
+  function syncGridToDisplay(cs) {
+    const used = new Set();
+    for (const c of cs) {
+      let gx = Math.max(0, Math.min(gridCols - 1, Math.round(c.displayX / CELL_SIZE)));
+      let gy = Math.max(0, Math.min(gridRows - 1, Math.round(c.displayY / CELL_SIZE)));
+      if (used.has(gy * gridCols + gx)) {            // 占了 → 螺旋找最近空格
+        let found = false;
+        for (let r = 1; r < 8 && !found; r++)
+          for (let dy = -r; dy <= r && !found; dy++)
+            for (let dx = -r; dx <= r && !found; dx++) {
+              const nx = gx + dx, ny = gy + dy;
+              if (nx < 0 || ny < 0 || nx >= gridCols || ny >= gridRows) continue;
+              if (!used.has(ny * gridCols + nx)) { gx = nx; gy = ny; found = true; }
+            }
+      }
+      used.add(gy * gridCols + gx);
+      c.gridX = gx; c.gridY = gy; c.prevGridX = gx; c.prevGridY = gy;
     }
   }
 
