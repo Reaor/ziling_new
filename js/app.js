@@ -142,6 +142,12 @@ document.addEventListener('DOMContentLoaded', () => {
     { name: '摇摆竹帘', make: () => ({ mask: buildVBandsCells(), anim: 'curtain' }) },
     { name: '扭动',   make: () => ({ mask: buildDiskCells(),      anim: 'twist' }) },
     { name: '钟摆',   make: () => ({ mask: buildColumnCells(),    anim: 'pendulum' }) },
+    // 物理规律动态：
+    { name: '摆群波', make: () => ({ mask: buildWideBandCells(),  anim: 'pendwave' }) },
+    { name: '弹跳',   make: () => ({ mask: buildWideBandCells(),  anim: 'bounce' }) },
+    { name: '行星轨道', make: () => ({ mask: buildDiskCells(),    anim: 'orbit' }) },
+    // 飞龙：里字组成龙身剪影、飞来飞去（显示层定位）。
+    { name: '飞龙',   make: () => ({ mask: buildDragonCells(), anim: 'dragon', dragon: true }) },
   ];
   let shapeIndex = 0;
   let shapeActive = false;
@@ -574,6 +580,18 @@ document.addEventListener('DOMContentLoaded', () => {
     for (let y = m; y < gridRows - m; y++) for (let dx = -2; dx <= 2; dx++) cells.push({ x: cx + dx, y });
     return cells;
   }
+  // 满宽矮带（摆群波 / 弹跳底形）：靠中部的整宽矮块，左右铺满 → 每列都有里字摆动/弹跳。
+  function buildWideBandCells() {
+    const cells = [], m = 1, y0 = Math.floor(gridRows * 0.40), h = 6;
+    for (let dy = 0; dy < h; dy++) for (let x = m; x < gridCols - m; x++) cells.push({ x, y: y0 + dy });
+    return cells;
+  }
+  // 飞龙：只需提供里字数量（龙身长度），位置全由 dragon 动态在显示层决定。约 90 个里字成一条龙。
+  function buildDragonCells() {
+    const cells = [], n = 90, cx = Math.floor(gridCols / 2), cy = Math.floor(gridRows / 2);
+    for (let i = 0; i < n; i++) cells.push({ x: (cx + i) % gridCols, y: (cy + ((i / gridCols) | 0)) % gridRows });
+    return cells;
+  }
 
   // 形状自身动态：改 displayX/Y（位移）或 animA（亮度乘子）。t = 秒。所有位移类均经实测在各
   // 相位 0 重叠（刚体旋转/相似缩放，或位移梯度 <1 格/格 → 不会把相邻里字挤到一起）。
@@ -703,6 +721,7 @@ document.addEventListener('DOMContentLoaded', () => {
     shapeActive = false;
     inOrigin = false;
     currentAnim = null;
+    currentDragon = false;
     stopClock();
     currentPaths = null;
     currentCells = [];
@@ -996,9 +1015,11 @@ document.addEventListener('DOMContentLoaded', () => {
                    ['旋涡', 'vortex', buildDiskCells], ['绸缎', 'cloth', buildBlockCells],
                    ['脉动花', 'bloom', buildRoseCells], ['银河', 'galaxy', buildSpiralCells],
                    ['摇摆竹帘', 'curtain', buildVBandsCells], ['扭动', 'twist', buildDiskCells],
-                   ['钟摆', 'pendulum', buildColumnCells]];
-    for (const [label, anim, build] of anims)
-      r6.append(mkBtn(label, () => formSampled({ mask: build(), anim }, label)));
+                   ['钟摆', 'pendulum', buildColumnCells],
+                   ['摆群波', 'pendwave', buildWideBandCells], ['弹跳', 'bounce', buildWideBandCells],
+                   ['行星轨道', 'orbit', buildDiskCells], ['飞龙', 'dragon', buildDragonCells, true]];
+    for (const [label, anim, build, dragon] of anims)
+      r6.append(mkBtn(label, () => formSampled({ mask: build(), anim, dragon }, label)));
 
     // 原态文本（内容/长度自适应，模拟 AI 回答）
     const r5 = row(); r5.append(makeLabel('原态'));
