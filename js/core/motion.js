@@ -238,6 +238,7 @@ export class MotionEngine {
     }
     for (const id of charIds) {
       const c = this.characters.get(id);
+      if (c) c.flowFade = 1;                      // 清除上一形状(flow曲线)遗留的淡入淡出 → 满填里字全亮
       this._stuckTicks.set(id, 0);
       const d = DIRS[(Math.random() * 4) | 0];
       this._currentDirs.set(id, { dx: d.dx, dy: d.dy });
