@@ -121,24 +121,42 @@ export class ShapeSystem {
    *   multi-char 巨字 stacking; a single char always renders upright.
    * @returns {{ mask: Array<{x:number,y:number}>, constraint: 'strict' }}
    */
-  sampleMegachar(char, gridCols, gridRows, maxChars = 200, direction = 'horizontal') {
-    // 巨字 = 细化成 1 格宽的中心线（骨架），追踪成若干有序笔画路径 → 一排里字沿线流动
-    // （清爽、单薄、易辨形，像心形曲线那样运动）。先栅格化实心字身，再 Zhang-Suen 细化、
-    // 追踪笔画、**不做对角桥接**（保持细线）；motion 的 flow 用 8 邻域让里字沿斜笔画流动。
-    const solid = this._rasterToCells(gridCols, gridRows, 0.40, (ctx, W, H) => {
-      const fs = this._fitFont(ctx, char, W * 0.82, H * 0.60);
-      this._drawTextMask(ctx, char, W / 2, H / 2, fs, {
-        weight: 500,
-        strokeWidth: Math.max(SS * 0.18, fs * 0.008),
-      });
+  sampleMegachar(char, gridCols, gridRows, maxChars = 320, direction = 'horizontal') {
+    // 巨字 = 实心定形 + 自适应笔画粗细：先探测笔画密度（ink density = 字身格数 / 外接框面积），
+    // 据此选"加粗 / 常规 / 变细"——简单字(密度低)加粗 → 笔画≈3 排里字、厚实不单薄；复杂字
+    // (密度高)变细 → 笔画≈2 排里字、笔画分得开不糊成团；但都实心填满 → 无笔画缺漏。里字在
+    // 字身内收紧循环流动（满填循环 flowfill），既动态又辨形稳。对任意汉字稳健（只需栅格化）。
+    const probe = this._rasterToCells(gridCols, gridRows, 0.40, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, char, W * 0.73, H * 0.73);
+      this._drawTextMask(ctx, char, W / 2, H / 2, fs, { weight: 500, strokeWidth: SS * 0.15 });
     });
-    const paths = this._glyphToPaths(solid, gridCols, gridRows, false);
-    const cells = paths.flatMap(p => p.cells);
-    this.currentMask = cells;
+    const density = this._cellsDensity(probe);
+    let p;
+    if (density < 0.34)      p = { weight: 700, sw: SS * 0.40, thr: 0.34, fit: 0.70 }; // 简单字：加粗、厚实
+    else if (density < 0.46) p = { weight: 600, sw: SS * 0.15, thr: 0.42, fit: 0.73 }; // 常规
+    else                     p = { weight: 300, sw: 0,         thr: 0.50, fit: 0.78 }; // 复杂字：变细、笔画分得开
+
+    const cells = this._rasterToCells(gridCols, gridRows, p.thr, (ctx, W, H) => {
+      const fs = this._fitFont(ctx, char, W * p.fit, H * p.fit);
+      this._drawTextMask(ctx, char, W / 2, H / 2, fs, { weight: p.weight, strokeWidth: p.sw });
+    });
+    const mask = this._sparsify(cells, maxChars);
+    this.currentMask = mask;
     this.currentShape = char;
-    this.constraintType = 'flow';
-    // 巨字 → 多条开放笔画路径，里字沿各笔画单向流动（首尾淡入淡出、传送带回收）。
-    return { mask: cells, paths, constraint: 'flow', ordered: true };
+    this.constraintType = 'strict';
+    return { mask, constraint: 'strict' };
+  }
+
+  /** 字身格的"墨密度" = 格数 / 外接框面积（0..1）。高 → 笔画密集复杂；低 → 简单稀疏。@private */
+  _cellsDensity(cells) {
+    if (!cells || cells.length === 0) return 0;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const c of cells) {
+      if (c.x < minX) minX = c.x; if (c.x > maxX) maxX = c.x;
+      if (c.y < minY) minY = c.y; if (c.y > maxY) maxY = c.y;
+    }
+    const area = (maxX - minX + 1) * (maxY - minY + 1);
+    return area > 0 ? cells.length / area : 0;
   }
 
   /* ----------------------------------------------------------
