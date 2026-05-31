@@ -25,7 +25,7 @@ import { ShapeSystem, EMOJI_TEMPLATES } from './core/shape.js';
 import { GestureRecognizer } from './input/gestures.js';
 
 const CELL_SIZE = 9;           // 网格分辨率：格子更小 → 巨字细化成 1 格宽中心线后笔画分得开、细线清晰可辨
-const FONT_SIZE = 11;          // 里字字号（与较小格子平衡；嵌入 app 仍可读）
+const FONT_SIZE = 8;           // 里字字号：必须 ≤ CELL_SIZE(9) 才不溢出格子；留 1px 余白→相邻里字不糊、清爽不重叠
 const TICK_MS = 200;           // 常速 tick —— 匀速铁律（拖动期由引擎自行提速跟手）
 const SCATTER_RESTORE_MS = 2500;
 // 里字自适应 = 螺旋淡入/淡出（沿几条螺旋臂一个接一个，向内淡入/向外淡出）。
@@ -48,7 +48,7 @@ const FLOW_FILL_STROKE = 0.62;
 // 内有空格可循环流动、不卡死）。被牢牢约束在轮廓内（绝不漏出）；掩码外/被堵的里字朝最近
 // 空掩码格走（入场收束 + 填缝隙）→ 收束紧、分布均匀、少静止。配合较小页面 + 收束的字形
 // （字更小更细→掩码更小可填满、密集区更少），底部覆盖好、几乎无静止。
-const STRICT_FILL = 0.85;
+const STRICT_FILL = 0.82;
 // 微动：MICRO_AMP=点击反应脉冲幅度(px，点击时全体轻摆一下后衰减)；DECAY=衰减时长。
 const MICRO_AMP = 5.5;
 const MICRO_DECAY_MS = 700;
