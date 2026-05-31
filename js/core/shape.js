@@ -147,6 +147,28 @@ export class ShapeSystem {
     return { mask, constraint: 'strict', fill: p.fill };
   }
 
+  /**
+   * 竖排多行文本 → 实心掩码（用于即时北京时间：HH / MM / SS 三行大号数字，竖屏窄网格里
+   * 也清晰可读）。每行在自己的横带内居中、按带宽放到最大。满填流动呈现。
+   * @param {string[]} lines @returns {{mask, constraint:'strict', fill:number}}
+   */
+  sampleVerticalText(lines, gridCols, gridRows, maxChars = 320) {
+    const n = Math.max(1, lines.length);
+    const cells = this._rasterToCells(gridCols, gridRows, 0.34, (ctx, W, H) => {
+      const bandH = H / n;
+      for (let i = 0; i < n; i++) {
+        const line = String(lines[i]);
+        const fs = this._fitFont(ctx, line, W * 0.78, bandH * 0.82);
+        this._drawTextMask(ctx, line, W / 2, bandH * (i + 0.5), fs, { weight: 700, strokeWidth: SS * 0.34 });
+      }
+    });
+    const mask = this._sparsify(cells, maxChars);
+    this.currentMask = mask;
+    this.currentShape = lines.join(':');
+    this.constraintType = 'strict';
+    return { mask, constraint: 'strict', fill: 0.95 };
+  }
+
   /** 字身格的"墨密度" = 格数 / 外接框面积（0..1）。高 → 笔画密集复杂；低 → 简单稀疏。@private */
   _cellsDensity(cells) {
     if (!cells || cells.length === 0) return 0;
@@ -262,6 +284,12 @@ export class ShapeSystem {
         const r = scale * (0.62 + 0.38 * Math.cos(5 * t));
         x = cx + r * Math.cos(t - Math.PI / 2);
         y = cy + r * Math.sin(t - Math.PI / 2);
+      } else if (type === 'pinwheel') {
+        // 风车：四叶玫瑰 r=cos(2θ)，但每点按半径做漩涡偏转 → 弯曲的风车叶片
+        const r = Math.cos(2 * t) * scale;
+        const sw = t + 0.9 * (r / scale); // 漩涡偏转角
+        x = cx + r * Math.cos(sw);
+        y = cy + r * Math.sin(sw);
       } else {
         x = cx + scale * Math.cos(t);
         y = cy + scale * Math.sin(t);

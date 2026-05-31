@@ -109,18 +109,26 @@ document.addEventListener('DOMContentLoaded', () => {
     { name: '>_<',  cells: 150, make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
     { name: '心',   cells: 340, make: n => shapes.sampleMegachar('心', gridCols, gridRows, n) },
     { name: '春',   cells: 340, make: n => shapes.sampleMegachar('春', gridCols, gridRows, n) },
+    { name: '福',   cells: 340, make: n => shapes.sampleMegachar('福', gridCols, gridRows, n) },
+    { name: '龙',   cells: 340, make: n => shapes.sampleMegachar('龙', gridCols, gridRows, n) },
     { name: '爱心', cells: 80,  make: n => shapes.sampleCurveOrdered('heart', gridCols, gridRows, n) },
     { name: '四叶花', cells: 96, make: n => shapes.sampleCurveOrdered('rose', gridCols, gridRows, n) },
     { name: '五角星', cells: 96, make: n => shapes.sampleCurveOrdered('star', gridCols, gridRows, n) },
     { name: '无穷',  cells: 96, make: n => shapes.sampleCurveOrdered('lemniscate', gridCols, gridRows, n) },
-    { name: '北京时间', clock: true },   // 即时时分秒：每秒重采样时间字串 → 数字滚动呈现
-    { name: '正弦波', wave: true, make: () => ({ mask: buildWaveCells(), constraint: 'strict', fill: 0.92, wave: true }) },
+    { name: '风车',  cells: 110, make: n => shapes.sampleCurveOrdered('pinwheel', gridCols, gridRows, n) },
+    { name: '北京时间', clock: true },   // 即时时分秒：每秒重采样 HH/MM/SS 竖排 → 数字滚动
+    // 进阶·动态曲线（里字匀速走格 + 形状自身周期性变化叠加）：
+    { name: '正弦波', make: () => ({ mask: buildWaveCells(),   constraint: 'strict', fill: 0.9,  anim: 'wave' }) },
+    { name: '水波',   make: () => ({ mask: buildRippleCells(), constraint: 'strict', fill: 0.85, anim: 'ripple' }) },
+    { name: 'DNA双螺旋', make: () => ({ mask: buildDnaCells(), constraint: 'strict', fill: 0.85, anim: 'dna' }) },
+    { name: '涟漪',   make: () => ({ mask: buildDiskCells(),   constraint: 'strict', fill: 0.7,  anim: 'pulse' }) },
   ];
   let shapeIndex = 0;
   let shapeActive = false;
   let inOrigin = false;         // 原态（文本行）态：长按进入；点/双击/拖动回到动态形状
-  let waveAnim = false;         // 正弦波：形状自身起伏动画（显示层）
+  let currentAnim = null;       // 动态曲线的"形状自身动态"函数 (char,t)=>void（显示层）；无则 null
   let clockTimer = null;        // 北京时间：每秒重采样的定时器
+  let lastOriginText = null;    // 最近一次原态文本（长按回归原态时按此内容/顺序还原）
   let currentPaths = null;      // flow（曲线）的有序路径；strict 时为 null
   let currentCells = [];        // 当前形状占用的格子（strict 掩码 / flow 路径格的并集）
   let currentConstraint = 'flow'; // 'strict'（颜文字/巨字）| 'flow'（曲线）
@@ -226,7 +234,10 @@ document.addEventListener('DOMContentLoaded', () => {
         transit.splice(i, 1);
       }
     }
-    if (transit.length === 0 && reformPending) { reformPending = false; reformShape(); }
+    if (transit.length === 0 && reformPending) {
+      reformPending = false;
+      if (inOrigin) layoutOrigin(true); else reformShape();   // 原态：批次结束后含新字重排文本行
+    }
   }
 
   // 螺旋飞入到点 → 落进字形最近空格、注册进引擎，待批次结束并入流动。
@@ -258,7 +269,7 @@ document.addEventListener('DOMContentLoaded', () => {
     stopClock();                 // 切到任何普通形状都停掉时钟定时器
     shapeActive = true;
     inOrigin = false;
-    waveAnim = !!sampled.wave;    // 仅"正弦波"开启形状自身起伏
+    currentAnim = sampled.anim ? ANIMS[sampled.anim] : null; // 动态曲线开启形状自身动态
     let target = 0;
     if (sampled.paths && sampled.paths.length > 0) {
       // 曲线/数学曲线 → flow 沿线流动。闭环近乎全覆盖、开放笔画留空位供流动。
@@ -308,24 +319,70 @@ document.addEventListener('DOMContentLoaded', () => {
   function stopClock() { if (clockTimer) { clearInterval(clockTimer); clockTimer = null; } }
   function applyClock() {
     stopClock();
-    shapeActive = true; inOrigin = false; waveAnim = false;
+    shapeActive = true; inOrigin = false; currentAnim = null;
+    let inited = false;
     const tick = () => {
-      const sampled = shapes.sampleMegachar(beijingTimeString(), gridCols, gridRows, MAX_CHARS);
+      const [hh, mm, ss] = beijingTimeString().split(':');
+      // 竖排 HH / MM / SS 三行大号数字（窄竖屏也清晰）；每秒重采样→秒数那行里字滚动重排。
+      const sampled = shapes.sampleVerticalText([hh, mm, ss], gridCols, gridRows, MAX_CHARS);
       currentConstraint = 'strict'; currentPaths = null; currentCells = sampled.mask;
-      const target = Math.round(sampled.mask.length * (sampled.fill != null ? sampled.fill : STRICT_FILL));
-      if (Math.abs(target - aliveChars().length) > 8) adaptCharCount(target, currentCells);
+      if (!inited) { // 仅首次按目标增减里字（螺旋出入场）；之后只换掩码→数字平滑滚动、不每秒抖动
+        adaptCharCount(Math.round(sampled.mask.length * sampled.fill), currentCells);
+        inited = true;
+      }
       motion.setFlowFill(currentCells, aliveIds());
     };
     tick();
     clockTimer = setInterval(tick, 1000);
   }
 
-  // 横向带状（正弦波底形）：中间几行满宽 → 里字满填流动，叠加显示层正弦起伏成行波。
+  // ── 动态曲线：底形（mask）+ 形状自身动态（ANIMS 显示层位移）──────────────────
+  // 里字在底形里匀速走格（里字动态），叠加 ANIMS 的周期位移（形状自身动态）→ 优美变化曲线。
+  const CC = () => CELL_SIZE;
+  // 正弦波：中间横带（里字满填），整带按 gridX 相位大幅正弦起伏（波峰波谷大、视觉冲击）。
   function buildWaveCells() {
     const cells = [], midY = Math.floor(gridRows / 2), m = 2;
     for (let x = m; x < gridCols - m; x++) for (let dy = -1; dy <= 1; dy++) cells.push({ x, y: midY + dy });
     return cells;
   }
+  // 水波：多条横线（行距 5）满宽，每行相位错开 → 一片行进的波纹。
+  function buildRippleCells() {
+    const cells = [], m = 2;
+    for (let y = 5; y < gridRows - 4; y += 5) for (let x = m; x < gridCols - m; x++) cells.push({ x, y });
+    return cells;
+  }
+  // DNA：中央竖带（3 列满高），里字按奇偶分两股、左右反相摆动 → 竖向双螺旋交织摇摆。
+  function buildDnaCells() {
+    const cells = [], cx = Math.floor(gridCols / 2), m = 3;
+    for (let y = m; y < gridRows - m; y++) for (let dx = -1; dx <= 1; dx++) cells.push({ x: cx + dx, y });
+    return cells;
+  }
+  // 涟漪：实心圆盘，按到圆心的半径做向外扩散的正弦脉动 → 一圈圈水波涟漪。
+  function buildDiskCells() {
+    const cells = [], cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2, R = Math.min(gridCols, gridRows) * 0.32;
+    for (let y = 0; y < gridRows; y++) for (let x = 0; x < gridCols; x++)
+      if ((x - cx) ** 2 + (y - cy) ** 2 <= R * R) cells.push({ x, y });
+    return cells;
+  }
+
+  // 形状自身动态：直接改 displayX/Y（在 motion 设好显示位之后叠加）。t = 秒。
+  const ANIMS = {
+    wave:   (c, t) => { c.displayY += Math.sin(c.gridX * 0.36 + t * 1.9) * CC() * 4.2; },
+    ripple: (c, t) => { c.displayY += Math.sin(c.gridX * 0.5 - t * 2.3 + c.gridY * 0.55) * CC() * 1.7; },
+    dna:    (c, t) => {
+      const cx = Math.floor(gridCols / 2) * CC();
+      const strand = (c.id % 2) ? Math.PI : 0;
+      c.displayX = cx + Math.sin(c.gridY * 0.5 + t * 1.9 + strand) * CC() * 6.0
+                 + Math.sin(t * 0.6) * CC() * 1.2; // 整体轻微摇摆
+    },
+    pulse:  (c, t) => {
+      const cx = (gridCols - 1) / 2 * CC(), cy = (gridRows - 1) / 2 * CC();
+      const bx = c.gridX * CC() - cx, by = c.gridY * CC() - cy;
+      const rad = Math.hypot(bx, by) || 1;
+      const off = Math.sin(rad * 0.10 - t * 3.0) * CC() * 1.9; // 向外扩散的脉动
+      c.displayX += (bx / rad) * off; c.displayY += (by / rad) * off;
+    },
+  };
 
   // 调试入口：即时呈现任意巨字(串)/指定颜文字/指定曲线（接入云端 AI 后即用这些）。
   function applyMegachar(text) {
@@ -342,6 +399,8 @@ document.addEventListener('DOMContentLoaded', () => {
   function releaseShape() {
     shapeActive = false;
     inOrigin = false;
+    currentAnim = null;
+    stopClock();
     currentPaths = null;
     currentCells = [];
     motion.releaseShape();
@@ -374,46 +433,58 @@ document.addEventListener('DOMContentLoaded', () => {
     return cells;
   }
 
-  // 动态 → 原态：把在册里字钉成文本行（内容不变，沿用当前里字）。
-  function enterOrigin() {
-    if (inOrigin) return;
-    stopClock(); waveAnim = false;
-    clearTimeout(scatterTimer);
-    if (motion.isOrbiting()) motion.endOrbit();
-    const ids = aliveIds();
-    if (ids.length === 0) return;
-    const cells = buildTextLineCells(ids.length);
-    motion.setTextLine(cells, ids);
-    inOrigin = true;
-    shapeActive = false;
-    console.log(`→ 原态文本行 (${ids.length} 里字)`);
+  // 把在册里字钉成居中文本行：按阅读序(y,x)就近配对 → 整体平移/交叉最少（华容道滑入）。
+  // setContent=true 时按 lastOriginText 的字序给每个里字赋内容 → 文本按"原本顺序"呈现。
+  function layoutOrigin(setContent) {
+    const alive = aliveChars();
+    if (alive.length === 0) return;
+    const cells = buildTextLineCells(alive.length);  // 阅读序：左→右、上→下
+    currentConstraint = 'origin'; currentPaths = null; currentCells = cells;
+    const S = alive.slice().sort((a, b) => (a.gridY - b.gridY) || (a.gridX - b.gridX)); // 空间序
+    const content = (setContent && lastOriginText)
+      ? [...String(lastOriginText)].filter(ch => ch.trim().length > 0) : null;
+    // S[k] ↔ cells[k]（两者都是同序的第 k 个）→ 滑动最短；内容按阅读序 content[k] 落到 cells[k]。
+    if (content) for (let k = 0; k < S.length; k++) S[k].char = content[k % content.length];
+    motion.setTextLine(cells, S.map(c => c.id));
   }
 
-  // 原态内容/长度自适应（后续由 AI 回答驱动）：把里字增减到 text 的字数、设其内容为 text，
-  // 再钉成居中文本行。新增里字在中部淡入、沿格滑到位；多余里字回收。
+  // 动态 → 原态：把在册里字钉成文本行。若之前设过原态文本，按其内容/顺序还原（内容不变）。
+  function enterOrigin() {
+    if (inOrigin) return;
+    stopClock(); currentAnim = null;
+    clearTimeout(scatterTimer);
+    if (motion.isOrbiting()) motion.endOrbit();
+    if (aliveIds().length === 0) return;
+    inOrigin = true; shapeActive = false;
+    layoutOrigin(true);
+    console.log(`→ 原态文本行 (${aliveIds().length} 里字)`);
+  }
+
+  // 原态字数自适应（不抬到 MIN_CHARS）：用螺旋出入场增减里字，finalize 进文本格。
+  function adaptOriginCount(target, cells) {
+    target = Math.min(MAX_CHARS, Math.max(1, target));
+    const diff = target - aliveChars().length;
+    if (diff > 0) spawnSpiralIn(diff, cells);
+    else if (diff < 0) despawnSpiralOut(-diff, cells);
+  }
+
+  // 原态内容/长度自适应（后续由 AI 回答驱动）：里字数按 text 字数螺旋增/减（出入场如螺旋线、
+  // 不瞬变），内容/顺序按 text 还原，钉成居中文本行。螺旋批次结束后再 reapply 一次含新字。
   function formOriginText(text) {
     const content = [...String(text)].filter(ch => ch.trim().length > 0);
     const n = content.length;
     if (n === 0) return;
-    stopClock(); waveAnim = false;
+    lastOriginText = text;
+    stopClock(); currentAnim = null;
     clearTimeout(scatterTimer);
     if (motion.isOrbiting()) motion.endOrbit();
-    let alive = aliveChars();
-    // 多了→回收；少了→在中部不同格子生成（alpha 0 淡入）。
-    while (alive.length > n) { const c = alive.pop(); motion.unregisterCharacter(c.id); pool.release(c.id); }
-    let need = n - alive.length;
-    const cx = Math.floor(gridCols / 2), cy = Math.floor(gridRows / 2);
-    for (let k = 0; k < need; k++) {
-      const c = pool.acquire(content[0], (cx + k % 7) % gridCols, (cy + ((k / 7) | 0)) % gridRows);
-      c.alpha = 0;
-      motion.registerCharacter(c);
-    }
-    alive = aliveChars();
-    alive.forEach((c, i) => { c.char = content[i] || content[content.length - 1]; });
-    const cells = buildTextLineCells(alive.length);
-    motion.setTextLine(cells, alive.map(c => c.id));
     inOrigin = true; shapeActive = false;
-    console.log(`→ 原态文本「${text}」(${alive.length} 里字)`);
+    const cells = buildTextLineCells(n);
+    currentConstraint = 'origin'; currentPaths = null; currentCells = cells;
+    adaptOriginCount(n, cells);   // 螺旋增减到 n（出入场动画）
+    layoutOrigin(true);           // 现有里字即刻按内容/顺序滑向文本位；新字落位后由 reform 再排
+    reformPending = true;
+    console.log(`→ 原态文本「${text}」(${n} 字)`);
   }
 
   // 原态 → 动态：回到形状（advance=true 则切下一个）。里字从文本行沿格子滑进字形。
@@ -492,8 +563,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 曲线
     const r3 = row(); r3.append(makeLabel('曲线'));
-    const curves = [['心', 'heart'], ['四叶花', 'rose'], ['圆', 'circle'], ['无穷', 'lemniscate'], ['五角星', 'star']];
+    const curves = [['心', 'heart'], ['四叶花', 'rose'], ['圆', 'circle'], ['无穷', 'lemniscate'], ['五角星', 'star'], ['风车', 'pinwheel']];
     for (const [label, type] of curves) r3.append(mkBtn(label, () => applyCurve(type)));
+
+    // 动态曲线（形状自身动态）
+    const r6 = row(); r6.append(makeLabel('动态曲线'));
+    const anims = [['正弦波', 'wave', buildWaveCells, 0.9], ['水波', 'ripple', buildRippleCells, 0.85],
+                   ['DNA双螺旋', 'dna', buildDnaCells, 0.85], ['涟漪', 'pulse', buildDiskCells, 0.7]];
+    for (const [label, anim, build, fill] of anims)
+      r6.append(mkBtn(label, () => formSampled({ mask: build(), constraint: 'strict', fill, anim }, label)));
 
     // 原态文本（内容/长度自适应，模拟 AI 回答）
     const r5 = row(); r5.append(makeLabel('原态'));
@@ -508,12 +586,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // 杂项
     const r4 = row();
     r4.append(mkBtn('北京时间', () => applyClock()));
-    r4.append(mkBtn('正弦波', () => formSampled({ mask: buildWaveCells(), constraint: 'strict', fill: 0.92, wave: true }, '正弦波')));
     r4.append(mkBtn('下一个形状', () => applyShape(shapeIndex + 1)));
     r4.append(mkBtn('回归原态', () => enterOrigin()));
     r4.append(mkBtn('自由漫游', () => releaseShape()));
 
-    body.append(r1, r2, r3, r5, r4);
+    body.append(r1, r2, r3, r6, r5, r4);
 
     const toggle = mkBtn('调试 ⚙', () => {
       body.style.display = body.style.display === 'none' ? 'flex' : 'none';
@@ -641,13 +718,10 @@ document.addEventListener('DOMContentLoaded', () => {
           if (c.alpha < 1) c.alpha = Math.min(1, c.alpha + dtMs / 320);
         }
       }
-      if (waveAnim) {
-        // 进阶：形状自身动态——里字仍在带状里匀速走格，整条带按 gridX 相位做正弦起伏 → 一条
-        // 行进的正弦波纹（里字动态 + 形状自身动态叠加）。用 gridX 定相位→平滑行波、不抖。
+      if (currentAnim) {
+        // 进阶·形状自身动态：里字在底形里匀速走格(里字动态)，叠加周期位移(形状自身动态)。
         const t = now / 1000;
-        for (const c of aliveChars()) {
-          c.displayY += Math.sin(c.gridX * 0.5 + t * 2.2) * (CELL_SIZE * 1.8);
-        }
+        for (const c of aliveChars()) currentAnim(c, t);
       }
     }
     updateSpirals(dtMs); // 螺旋淡入/淡出（在显示位置更新之后，覆盖过渡里字的显示）
