@@ -10,8 +10,8 @@
 // Timing thresholds
 const TAP_TIMEOUT = 300;       // ms — max duration for a tap
 const DOUBLE_TAP_WINDOW = 300; // ms — max gap between two taps
-const LONG_PRESS_TIME = 500;   // ms — hold duration to trigger long-press
-const DRAG_THRESHOLD = 8;      // px — min movement to switch to drag
+const LONG_PRESS_TIME = 650;   // ms — 长按回归原态的判定时长（更长一点→拖着玩不易误触）
+const DRAG_THRESHOLD = 8;      // px — 超过即转为拖动并取消长按（任意拖动都能即时打断长按）
 
 // Gesture states
 const STATE = {
