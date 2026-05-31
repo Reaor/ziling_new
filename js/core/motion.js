@@ -376,18 +376,18 @@ export class MotionEngine {
     this._shapeMask = cells;
     this._rebuildMaskSet();
     this._originTargets = new Map();
-    // 就近匹配：里字与文本格都按阅读序(y,x)排序后一一对应 → 整体平移少、交叉少、过渡干净。
-    const ids = charIds.map(id => this.characters.get(id)).filter(Boolean);
-    ids.sort((a, b) => (a.gridY - b.gridY) || (a.gridX - b.gridX));
-    const sorted = cells.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
-    for (let i = 0; i < ids.length; i++) {
-      const cell = sorted[i] || sorted[sorted.length - 1];
+    // 按给定顺序一一配对：charIds[i] → cells[i]（配对/内容/阅读序由调用方 layoutOrigin 决定，
+    // 保证文本按"原本顺序"呈现，且滑动路程最短）。
+    for (let i = 0; i < charIds.length; i++) {
+      const c = this.characters.get(charIds[i]);
+      if (!c) continue;
+      const cell = cells[i] || cells[cells.length - 1];
       if (!cell) continue;
-      this._originTargets.set(ids[i].id, { x: cell.x, y: cell.y });
-      this._wanderTargets.set(ids[i].id, { tx: cell.x, ty: cell.y });
-      this._stuckTicks.set(ids[i].id, 0);
+      this._originTargets.set(charIds[i], { x: cell.x, y: cell.y });
+      this._wanderTargets.set(charIds[i], { tx: cell.x, ty: cell.y });
+      this._stuckTicks.set(charIds[i], 0);
       const d = DIRS[(Math.random() * 4) | 0];
-      this._currentDirs.set(ids[i].id, { dx: d.dx, dy: d.dy });
+      this._currentDirs.set(charIds[i], { dx: d.dx, dy: d.dy });
     }
   }
 
@@ -753,6 +753,17 @@ export class MotionEngine {
     // Record current occupation
     for (let i = 0; i < N; i++) {
       this._occupiedNow[idx(chars[i].gridX, chars[i].gridY)] = chars[i].id;
+    }
+
+    // flowfill：每帧给"还在字形外"的里字一个最近空掩码格作入场目标（不必等卡住）→ 杜绝
+    // 少数里字漂在字形外漫游；已在字形内的无目标、照常循环流动。
+    if (this._shapeConstraint === 'flowfill') {
+      for (let i = 0; i < N; i++) {
+        const c = chars[i];
+        if (!this._inMask(c.gridX, c.gridY) && !this._wanderTargets.has(c.id)) {
+          this._assignFlowFillTarget(c);
+        }
+      }
     }
 
     // Random priority order — PIBT priority inheritance handles cascade naturally
