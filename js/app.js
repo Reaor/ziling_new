@@ -120,16 +120,20 @@ document.addEventListener('DOMContentLoaded', () => {
     // 进阶·动态曲线（里字匀速走格 + 形状自身周期性变化叠加）：
     { name: '正弦波', make: () => ({ mask: buildWaveCells(),   anim: 'wave' }) },
     { name: '水波',   make: () => ({ mask: buildRippleCells(), anim: 'ripple' }) },
-    { name: 'DNA双螺旋', make: () => ({ mask: buildDnaCells(), anim: 'dna' }) },
+    { name: 'DNA双螺旋', make: () => ({ mask: buildVBandsCells(), anim: 'dna' }) },
     { name: '涟漪',   make: () => ({ mask: buildDiskCells(),   anim: 'pulse' }) },
     { name: '旋涡',   make: () => ({ mask: buildDiskCells(),   anim: 'vortex' }) },
     { name: '绸缎',   make: () => ({ mask: buildBlockCells(),  anim: 'cloth' }) },
     { name: '脉动花', make: () => ({ mask: buildRoseCells(),   anim: 'bloom' }) },
+    { name: '银河',   make: () => ({ mask: buildSpiralCells(), anim: 'galaxy' }) },   // 新①
+    { name: '摇摆竹帘', make: () => ({ mask: buildVBandsCells(), anim: 'curtain' }) }, // 新②
+    { name: '呼吸',   make: () => ({ mask: buildDiskCells(),   anim: 'breathe' }) },   // 新③
   ];
   let shapeIndex = 0;
   let shapeActive = false;
   let inOrigin = false;         // 原态（文本行）态：长按进入；点/双击/拖动回到动态形状
   let currentAnim = null;       // 动态曲线的"形状自身动态"函数 (char,t)=>void（显示层）；无则 null
+  let animDirty = false;        // 用过 anim 亮度乘子 → 离开时需清一次
   let clockTimer = null;        // 北京时间：每秒重采样的定时器
   let lastOriginText = null;    // 最近一次原态文本（长按回归原态时按此内容/顺序还原）
   let currentPaths = null;      // flow（曲线）的有序路径；strict 时为 null
@@ -208,6 +212,18 @@ document.addEventListener('DOMContentLoaded', () => {
     if (victims.length) reformPending = true;
   }
 
+  // 立即收尾所有进行中的螺旋过渡：'in' 落位保留、'out' 直接回收。切换形状前调用 → 杜绝
+  // 快速连切时过渡里字被遗弃（既不在册又不释放）累积，最终"把字卡没"。
+  function flushTransit() {
+    for (const a of transit) {
+      transitIds.delete(a.char.id);
+      if (a.mode === 'in') { a.char.alpha = 1; finalizeSpiralIn(a); }
+      else pool.release(a.char.id);
+    }
+    transit.length = 0;
+    reformPending = false;
+  }
+
   function adaptCharCount(target, mask) {
     target = Math.max(MIN_CHARS, Math.min(MAX_CHARS, target));
     const diff = target - aliveChars().length;
@@ -284,9 +300,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // 把一份采样结果（mask 或 paths）成形。供双击循环、调试面板任意字/颜文字/曲线共用。
   function formSampled(sampled, label = 'shape') {
     stopClock();                 // 切到任何普通形状都停掉时钟定时器
+    flushTransit();              // 先收尾上一形状未完成的螺旋过渡（防连切把字卡没）
     shapeActive = true;
     inOrigin = false;
     currentAnim = sampled.anim ? ANIMS[sampled.anim] : null; // 动态曲线开启形状自身动态
+    if (currentAnim) animDirty = true;
     let target = 0;
     if (sampled.paths && sampled.paths.length > 0) {
       // 曲线/数学曲线 → flow 沿线流动。闭环近乎全覆盖、开放笔画留空位供流动。
@@ -337,6 +355,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function stopClock() { if (clockTimer) { clearInterval(clockTimer); clockTimer = null; } }
   function applyClock() {
     stopClock();
+    flushTransit();
     shapeActive = true; inOrigin = false; currentAnim = null;
     let inited = false;
     const tick = () => {
@@ -370,15 +389,10 @@ document.addEventListener('DOMContentLoaded', () => {
     return cells;
   }
   // DNA：中央竖带（3 列满高），里字按奇偶分两股、左右反相摆动 → 竖向双螺旋交织摇摆。
-  function buildDnaCells() {
-    const cells = [], cx = Math.floor(gridCols / 2), m = 3;
-    for (let y = m; y < gridRows - m; y++) for (let dx = -1; dx <= 1; dx++) cells.push({ x: cx + dx, y });
-    return cells;
-  }
-  // 涟漪：实心圆盘，按到圆心的半径做向外扩散的正弦脉动 → 一圈圈水波涟漪。
+  // 涟漪：实心圆盘（中心留小孔）；动态为向外扩散的"亮度脉动"（位置不动→绝不重叠）。
   function buildDiskCells() {
-    const cells = [], cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2, R = Math.min(gridCols, gridRows) * 0.32;
-    const rin = 2.2; // 中心留小孔：旋涡/脉动在圆心处会把里字挤到一起，挖空圆心 → 不重叠
+    const cells = [], cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2, R = Math.min(gridCols, gridRows) * 0.34;
+    const rin = 2.2;
     for (let y = 0; y < gridRows; y++) for (let x = 0; x < gridCols; x++) {
       const d2 = (x - cx) ** 2 + (y - cy) ** 2;
       if (d2 <= R * R && d2 >= rin * rin) cells.push({ x, y });
@@ -386,7 +400,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return cells;
   }
 
-  // 绸缎：居中实心方块（一片"布"），整片做二维行波起伏。
+  // 绸缎：居中实心方块（一片"布"），整片做单向行波起伏。
   function buildBlockCells() {
     const cells = [], w = Math.min(gridCols - 6, 16), h = Math.min(gridRows - 14, 18);
     const x0 = Math.floor((gridCols - w) / 2), y0 = Math.floor((gridRows - h) / 2);
@@ -401,50 +415,75 @@ document.addEventListener('DOMContentLoaded', () => {
       const r = Math.cos(2 * th) * scale;
       const x = Math.round(cx + r * Math.cos(th)), y = Math.round(cy + r * Math.sin(th));
       if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) continue;
-      if ((x - cx) ** 2 + (y - cy) ** 2 < 3 * 3) continue; // 四瓣在圆心交汇 → 挖空中心避免拥挤
+      if ((x - cx) ** 2 + (y - cy) ** 2 < 3 * 3) continue;
+      const k = y * gridCols + x; if (seen.has(k)) continue; seen.add(k); cells.push({ x, y });
+    }
+    return cells;
+  }
+  // 竖帘：等距竖列（满高）→ 整体做横向行波（DNA / 摇摆竖帘共用）。
+  function buildVBandsCells() {
+    const cells = [], m = 3;
+    for (let x = 4; x < gridCols - 4; x += 4) for (let y = m; y < gridRows - m; y++) cells.push({ x, y });
+    return cells;
+  }
+  // 银河：两条对数螺旋臂（绕心刚体旋转 → 旋臂卷动）。
+  function buildSpiralCells() {
+    const cells = [], seen = new Set(), cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2;
+    for (let arm = 0; arm < 2; arm++) for (let s = 0; s <= 70; s++) {
+      const rad = 1.5 + s * 0.22, th = arm * Math.PI + s * 0.32;
+      const x = Math.round(cx + rad * Math.cos(th)), y = Math.round(cy + rad * Math.sin(th));
+      if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) continue;
       const k = y * gridCols + x; if (seen.has(k)) continue; seen.add(k); cells.push({ x, y });
     }
     return cells;
   }
 
-  // 形状自身动态：直接改 displayX/Y（在 motion 设好显示位之后叠加）。t = 秒。
+  // 形状自身动态：改 displayX/Y（位移）或 animA（亮度乘子）。t = 秒。所有位移类均经实测在各
+  // 相位 0 重叠（刚体旋转/相似缩放，或位移梯度 <1 格/格 → 不会把相邻里字挤到一起）。
   const cen = () => ({ cx: (gridCols - 1) / 2 * CC(), cy: (gridRows - 1) / 2 * CC() });
   const ANIMS = {
+    // 正弦波：大振幅行波（峰谷跨度大、视觉冲击）。
     wave:   (c, t) => { c.displayY += Math.sin(c.gridX * 0.36 + t * 1.9) * CC() * 4.2; },
+    // 水波：多行错相行波。
     ripple: (c, t) => { c.displayY += Math.sin(c.gridX * 0.5 - t * 2.3 + c.gridY * 0.55) * CC() * 1.7; },
-    dna:    (c, t) => {
-      const cx = Math.floor(gridCols / 2) * CC();
-      const strand = (c.id % 2) ? Math.PI : 0;
-      c.displayX = cx + Math.sin(c.gridY * 0.5 + t * 1.9 + strand) * CC() * 6.0
-                 + Math.sin(t * 0.6) * CC() * 1.2; // 整体轻微摇摆
-    },
+    // DNA：竖帘按行相位横向行波（X 位移梯度 <1 → 不重叠），双股错相像螺旋交织。
+    dna:    (c, t) => { c.displayX += Math.sin(c.gridY * 0.5 + t * 1.8 + ((c.id % 2) ? Math.PI : 0)) * CC() * 1.4; },
+    // 涟漪：向外扩散的亮度脉动（位置不动 → 0 重叠），一圈圈水波。
     pulse:  (c, t) => {
       const { cx, cy } = cen();
-      const bx = c.gridX * CC() - cx, by = c.gridY * CC() - cy;
-      const rad = Math.hypot(bx, by) || 1;
-      const off = Math.sin(rad * 0.10 - t * 3.0) * CC() * 1.9; // 向外扩散的脉动
-      c.displayX += (bx / rad) * off; c.displayY += (by / rad) * off;
+      const r = Math.hypot(c.gridX * CC() - cx, c.gridY * CC() - cy);
+      c.animA = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(r * 0.10 - t * 3.0));
     },
-    // 旋涡：绕中心差速旋转（内圈快、外圈慢）→ 漩涡卷动。
+    // 旋涡：整盘绕心刚体往复旋转（刚体变换 → 0 重叠）。
     vortex: (c, t) => {
       const { cx, cy } = cen();
-      const bx = c.gridX * CC() - cx, by = c.gridY * CC() - cy;
-      const rad = Math.hypot(bx, by);
-      const a = Math.atan2(by, bx) + t * 1.0 + (60 - rad) * 0.012;
-      c.displayX = cx + rad * Math.cos(a); c.displayY = cy + rad * Math.sin(a);
+      const bx = c.gridX * CC() - cx, by = c.gridY * CC() - cy, r = Math.hypot(bx, by);
+      const a = Math.atan2(by, bx) + Math.sin(t * 0.6) * 0.9;
+      c.displayX = cx + r * Math.cos(a); c.displayY = cy + r * Math.sin(a);
     },
-    // 绸缎：二维行波（横纵两个正弦叠加）→ 像一片随风起伏的布。
-    cloth: (c, t) => {
-      c.displayY += Math.sin(c.gridX * 0.5 + t * 2.0) * CC() * 1.7
-                  + Math.cos(c.gridY * 0.45 + t * 1.5) * CC() * 1.3;
-    },
-    // 脉动花：整朵旋转 + 半径周期缩放 → 一开一合的绽放。
-    bloom: (c, t) => {
+    // 绸缎：单向行波（按列相位，振幅适中 → 0 重叠），像随风起伏的布。
+    cloth:  (c, t) => { c.displayY += Math.sin(c.gridX * 0.55 + t * 2.0) * CC() * 1.5; },
+    // 脉动花：整朵旋转 + 半径周期缩放（相似变换）→ 一开一合的绽放。
+    bloom:  (c, t) => {
       const { cx, cy } = cen();
-      const bx = c.gridX * CC() - cx, by = c.gridY * CC() - cy;
-      const rad = Math.hypot(bx, by);
+      const bx = c.gridX * CC() - cx, by = c.gridY * CC() - cy, r = Math.hypot(bx, by);
       const s = 1 + 0.24 * Math.sin(t * 1.8), a = Math.atan2(by, bx) + t * 0.5;
-      c.displayX = cx + rad * s * Math.cos(a); c.displayY = cy + rad * s * Math.sin(a);
+      c.displayX = cx + r * s * Math.cos(a); c.displayY = cy + r * s * Math.sin(a);
+    },
+    // 新①银河：旋臂绕心刚体旋转（匀速转）→ 漩涡星系卷动。
+    galaxy: (c, t) => {
+      const { cx, cy } = cen();
+      const bx = c.gridX * CC() - cx, by = c.gridY * CC() - cy, r = Math.hypot(bx, by);
+      const a = Math.atan2(by, bx) + t * 0.7;
+      c.displayX = cx + r * Math.cos(a); c.displayY = cy + r * Math.sin(a);
+    },
+    // 新②摇摆竖帘：每列整体左右摆（列内同移、列间相位差小 → 0 重叠）→ 风中竹帘。
+    curtain: (c, t) => { c.displayX += Math.sin(t * 1.6 + c.gridX * 0.25) * CC() * 2.2; },
+    // 新③呼吸：整体均匀缩放（相似变换 → 0 重叠）+ 亮度同步 → 一呼一吸。
+    breathe: (c, t) => {
+      const { cx, cy } = cen(); const s = 1 + 0.18 * Math.sin(t * 1.6);
+      c.displayX = cx + (c.gridX * CC() - cx) * s; c.displayY = cy + (c.gridY * CC() - cy) * s;
+      c.animA = 0.6 + 0.4 * (0.5 + 0.5 * Math.sin(t * 1.6));
     },
   };
 
@@ -518,7 +557,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (inOrigin) return;
     if (aliveIds().length === 0) return;
     if (lastOriginText) { formOriginText(lastOriginText); return; }
-    stopClock(); currentAnim = null;
+    stopClock(); currentAnim = null; flushTransit();
     clearTimeout(scatterTimer);
     if (motion.isOrbiting()) motion.endOrbit();
     inOrigin = true; shapeActive = false;
@@ -541,7 +580,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const n = content.length;
     if (n === 0) return;
     lastOriginText = text;
-    stopClock(); currentAnim = null;
+    stopClock(); currentAnim = null; flushTransit();
     clearTimeout(scatterTimer);
     if (motion.isOrbiting()) motion.endOrbit();
     inOrigin = true; shapeActive = false;
@@ -635,9 +674,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // 动态曲线（形状自身动态）
     const r6 = row(); r6.append(makeLabel('动态曲线'));
     const anims = [['正弦波', 'wave', buildWaveCells], ['水波', 'ripple', buildRippleCells],
-                   ['DNA双螺旋', 'dna', buildDnaCells], ['涟漪', 'pulse', buildDiskCells],
+                   ['DNA双螺旋', 'dna', buildVBandsCells], ['涟漪', 'pulse', buildDiskCells],
                    ['旋涡', 'vortex', buildDiskCells], ['绸缎', 'cloth', buildBlockCells],
-                   ['脉动花', 'bloom', buildRoseCells]];
+                   ['脉动花', 'bloom', buildRoseCells], ['银河', 'galaxy', buildSpiralCells],
+                   ['摇摆竹帘', 'curtain', buildVBandsCells], ['呼吸', 'breathe', buildDiskCells]];
     for (const [label, anim, build] of anims)
       r6.append(mkBtn(label, () => formSampled({ mask: build(), anim }, label)));
 
@@ -787,9 +827,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
       }
       if (currentAnim) {
-        // 进阶·形状自身动态：里字在底形里匀速走格(里字动态)，叠加周期位移(形状自身动态)。
+        // 进阶·形状自身动态：钉位里字 + 在显示层叠加位移/亮度(形状自身动态)。animA=亮度乘子。
         const t = now / 1000;
-        for (const c of aliveChars()) currentAnim(c, t);
+        for (const c of aliveChars()) { c.animA = 1; currentAnim(c, t); }
+      } else if (animDirty) {
+        // 离开动态曲线后清掉残留的亮度乘子，避免里字停在变暗状态。
+        for (const c of pool.getAll()) c.animA = 1;
+        animDirty = false;
       }
     }
     updateSpirals(dtMs); // 螺旋淡入/淡出（在显示位置更新之后，覆盖过渡里字的显示）
@@ -810,7 +854,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const amp = motion.isOrbiting() ? 0 : microEnv * MICRO_AMP;
     for (const char of pool.getAll()) {
       // 流动淡入/淡出（开放笔画首端淡入、尾端淡出）与螺旋淡入淡出 alpha 相乘。
-      const eff = char.alpha * (char.flowFade != null ? char.flowFade : 1);
+      const eff = char.alpha * (char.flowFade != null ? char.flowFade : 1)
+                * (char.animA != null ? char.animA : 1);
       if (eff > 0.01) {
         const mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
         const my = amp ? Math.cos(tSec * 9 + char.id * 2.1) * amp : 0;
