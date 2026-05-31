@@ -365,13 +365,13 @@ export class MotionEngine {
    * @param {Array<{x,y}>} cells —— 文本行格子（顺序即阅读序：左→右、上→下）
    * @param {number[]} charIds
    */
-  setTextLine(cells, charIds) {
+  setTextLine(cells, charIds, constraint = 'origin') {
     for (const id of this._shapeChars) { const c = this.characters.get(id); if (c) c.flowFade = 1; }
     this._flowOf.clear();
     this._flowPaths = null;
     this._orbit = false;
     this._orbitOf.clear();
-    this._shapeConstraint = 'origin';
+    this._shapeConstraint = constraint; // 'origin'(文本行) 或 'anchored'(动态曲线底形)：均钉位保持
     this._shapeChars = new Set(charIds);
     this._shapeMask = cells;
     this._rebuildMaskSet();
@@ -806,8 +806,8 @@ export class MotionEngine {
             // 到达当前路径格 → 推进一格（少量随机停顿，避免像弹簧一样单调）。
             if (Math.random() < 0.08) this._setFlowTarget(char.id); // 偶尔停顿一拍（更自然）
             else this._advanceFlowIndex(char.id);
-          } else if (this._shapeConstraint === 'origin') {
-            // 原态：到位即钉住——保留目标(=自身文本格)，stay 永远胜出 → 静止保持文本行位置。
+          } else if (this._shapeConstraint === 'origin' || this._shapeConstraint === 'anchored') {
+            // 原态/动态曲线底形：到位即钉住——保留目标(=自身钉位格)，stay 永远胜出 → 静止保持。
           } else {
             this._wanderTargets.delete(char.id);
             // strict（颜文字/巨字）= 收紧的就近游走：每个里字持续做小幅横纵位移
@@ -836,8 +836,8 @@ export class MotionEngine {
             // 满填循环里卡住（无论在字形内还是外）→ 朝**最近的空掩码格**走：在外的走进
             // 字形（入场、收束），在内的去填最近的空隙（消除静止、分布更均匀更密）。
             this._assignFlowFillTarget(char);
-          } else if (this._shapeConstraint === 'origin') {
-            // 原态被堵 → 重新指向自己的文本格，继续沿格子挪过去（不乱给随机目标）。
+          } else if (this._shapeConstraint === 'origin' || this._shapeConstraint === 'anchored') {
+            // 原态/动态曲线底形被堵 → 重新指向自己的钉位格，继续沿格挪过去（不乱给随机目标）。
             const t = this._originTargets && this._originTargets.get(char.id);
             if (t) this._wanderTargets.set(char.id, { tx: t.x, ty: t.y });
           } else {
@@ -901,6 +901,7 @@ export class MotionEngine {
     // origin（原态文本行）不做掩码围栏：里字靠"唯一目标格 + stay 胜出"被钉住，途中需自由
     // 穿行去各自文本格，故不限制在掩码内。其余成形模式(strict/flowfill)仍围栏在字形内。
     const isInsideShape = isShape && this._shapeConstraint !== 'origin' &&
+      this._shapeConstraint !== 'anchored' &&
       this._shapeMaskSet.size > 0 && this._inMask(char.gridX, char.gridY);
 
     // Candidates: [stay] + [neighbors] — only unoccupied. flow 用 8 邻域（含对角），
