@@ -704,19 +704,22 @@ export class MotionEngine {
       const s = Math.max(0, Math.min(1, this.dragBias.strength));
       return this.dragTickDuration + (this.tickDuration - this.dragTickDuration) * (1 - s);
     }
-    // 形状变换重排提速：用一条"钟形"曲线平滑调速 —— 切换瞬间从常速**逐步加快**到最快，
-    // 大致成形后再**逐步放慢**回常速（而非瞬间变快/到点突变）。整个过程平缓自然。
-    // 形状内的常态运动速率不变（boost 用尽即恒为常速）。
+    // 形状变换重排提速：前段加速、散开重排时最快，**大致成形后迅速回落**到常速。用前快后慢的
+    // 钟形（峰值偏前 + 末段平方衰减）：开头 ~25% 窗口内冲到最快，其后较快降回常速 —— 避免"成形
+    // 后还快很久"。形状内的常态运动速率不变（boost 用尽即恒为常速）。
     if (this._reformBoostMs > 0) {
       const p = 1 - this._reformBoostMs / this.reformBoostTotal;   // 0→1 贯穿提速窗口
-      const bell = Math.sin(Math.max(0, Math.min(1, p)) * Math.PI); // 0→1→0：先加速后减速
+      const PEAK = 0.22;                                           // 峰值位置（偏前）
+      let bell;
+      if (p < PEAK) bell = p / PEAK;                               // 0→1 快速加速
+      else { const q = (p - PEAK) / (1 - PEAK); bell = (1 - q) * (1 - q); } // 1→0 平方衰减（先快后缓）
       return this.tickDuration + (this.reformTickDuration - this.tickDuration) * bell;
     }
     return this.tickDuration;
   }
 
-  /** 触发一次形状重排提速（持续 ms 毫秒，期间 tick 由快渐进回落到常速）。 */
-  boostReform(ms = 1400) { this._reformBoostMs = ms; this.reformBoostTotal = ms; }
+  /** 触发一次形状重排提速（持续 ms 毫秒，前段加速、成形后较快回落到常速）。 */
+  boostReform(ms = 1000) { this._reformBoostMs = ms; this.reformBoostTotal = ms; }
 
   updateDisplayPositions(progress) {
     const cs = this.cellSize;
