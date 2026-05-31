@@ -118,10 +118,13 @@ document.addEventListener('DOMContentLoaded', () => {
     { name: '风车',  cells: 110, make: n => shapes.sampleCurveOrdered('pinwheel', gridCols, gridRows, n) },
     { name: '北京时间', clock: true },   // 即时时分秒：每秒重采样 HH/MM/SS 竖排 → 数字滚动
     // 进阶·动态曲线（里字匀速走格 + 形状自身周期性变化叠加）：
-    { name: '正弦波', make: () => ({ mask: buildWaveCells(),   constraint: 'strict', fill: 0.9,  anim: 'wave' }) },
-    { name: '水波',   make: () => ({ mask: buildRippleCells(), constraint: 'strict', fill: 0.85, anim: 'ripple' }) },
-    { name: 'DNA双螺旋', make: () => ({ mask: buildDnaCells(), constraint: 'strict', fill: 0.85, anim: 'dna' }) },
-    { name: '涟漪',   make: () => ({ mask: buildDiskCells(),   constraint: 'strict', fill: 0.7,  anim: 'pulse' }) },
+    { name: '正弦波', make: () => ({ mask: buildWaveCells(),   anim: 'wave' }) },
+    { name: '水波',   make: () => ({ mask: buildRippleCells(), anim: 'ripple' }) },
+    { name: 'DNA双螺旋', make: () => ({ mask: buildDnaCells(), anim: 'dna' }) },
+    { name: '涟漪',   make: () => ({ mask: buildDiskCells(),   anim: 'pulse' }) },
+    { name: '旋涡',   make: () => ({ mask: buildDiskCells(),   anim: 'vortex' }) },
+    { name: '绸缎',   make: () => ({ mask: buildBlockCells(),  anim: 'cloth' }) },
+    { name: '脉动花', make: () => ({ mask: buildRoseCells(),   anim: 'bloom' }) },
   ];
   let shapeIndex = 0;
   let shapeActive = false;
@@ -259,9 +262,23 @@ document.addEventListener('DOMContentLoaded', () => {
     motion.releaseShape();
     if (currentConstraint === 'strict') {
       motion.setFlowFill(currentCells, aliveIds());
+    } else if (currentConstraint === 'anchored') {
+      formAnchored(currentCells);
+    } else if (currentConstraint === 'origin') {
+      layoutOrigin(true);
     } else if (currentPaths) {
       motion.setFlowPaths(currentPaths, aliveIds());
     }
+  }
+
+  // 动态曲线：把在册里字钉到底形格上（按阅读序就近配对，1:1）。不流动 → 无颤动/重叠；
+  // 形状自身动态由 currentAnim 在显示层平滑叠加。
+  function formAnchored(cells) {
+    const alive = aliveChars();
+    if (alive.length === 0) return;
+    const S = alive.slice().sort((a, b) => (a.gridY - b.gridY) || (a.gridX - b.gridX));
+    const C = cells.slice().sort((a, b) => (a.y - b.y) || (a.x - b.x));
+    motion.setTextLine(C, S.map(c => c.id), 'anchored');
   }
 
   // 把一份采样结果（mask 或 paths）成形。供双击循环、调试面板任意字/颜文字/曲线共用。
@@ -285,12 +302,13 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (sampled.mask && sampled.mask.length > 0) {
       // 颜文字/巨字 → 满填循环流动：里字数 ≈ 掩码格数 × 0.88（留约 12% 缝隙供笔画内
       // 循环流动）。不强行抬到 MIN_CHARS（否则小字形会多出无处安放的里字乱游）。
-      currentConstraint = 'strict';
+      // 动态曲线(anim)→钉位 anchored（不流动，避免颤动/重叠，形状动态由 currentAnim 叠加），
+      // 一字一格(填满 cells)；其余颜文字/巨字→strict 满填循环流动。
+      currentConstraint = sampled.anim ? 'anchored' : 'strict';
       currentPaths = null;
       currentCells = sampled.mask;
-      // 满填循环流动：里字数 ≈ 掩码格数 × fill（按字复杂度自适应：简单字更密不松散、复杂字
-      // 留更多缝隙供循环）。不强行抬到 MIN_CHARS（否则小字形会多出无处安放的里字乱游）。
-      target = Math.round(sampled.mask.length * (sampled.fill != null ? sampled.fill : STRICT_FILL));
+      const fillv = sampled.anim ? 1.0 : (sampled.fill != null ? sampled.fill : STRICT_FILL);
+      target = Math.round(sampled.mask.length * fillv);
     } else {
       return;
     }
@@ -360,12 +378,37 @@ document.addEventListener('DOMContentLoaded', () => {
   // 涟漪：实心圆盘，按到圆心的半径做向外扩散的正弦脉动 → 一圈圈水波涟漪。
   function buildDiskCells() {
     const cells = [], cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2, R = Math.min(gridCols, gridRows) * 0.32;
-    for (let y = 0; y < gridRows; y++) for (let x = 0; x < gridCols; x++)
-      if ((x - cx) ** 2 + (y - cy) ** 2 <= R * R) cells.push({ x, y });
+    const rin = 2.2; // 中心留小孔：旋涡/脉动在圆心处会把里字挤到一起，挖空圆心 → 不重叠
+    for (let y = 0; y < gridRows; y++) for (let x = 0; x < gridCols; x++) {
+      const d2 = (x - cx) ** 2 + (y - cy) ** 2;
+      if (d2 <= R * R && d2 >= rin * rin) cells.push({ x, y });
+    }
+    return cells;
+  }
+
+  // 绸缎：居中实心方块（一片"布"），整片做二维行波起伏。
+  function buildBlockCells() {
+    const cells = [], w = Math.min(gridCols - 6, 16), h = Math.min(gridRows - 14, 18);
+    const x0 = Math.floor((gridCols - w) / 2), y0 = Math.floor((gridRows - h) / 2);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) cells.push({ x: x0 + x, y: y0 + y });
+    return cells;
+  }
+  // 脉动花：四叶玫瑰细轮廓（旋转 + 缩放绽放）。
+  function buildRoseCells() {
+    const cells = [], seen = new Set();
+    const cx = (gridCols - 1) / 2, cy = (gridRows - 1) / 2, scale = Math.min(gridCols, gridRows) * 0.44;
+    for (let th = 0; th < Math.PI * 2; th += 0.008) {
+      const r = Math.cos(2 * th) * scale;
+      const x = Math.round(cx + r * Math.cos(th)), y = Math.round(cy + r * Math.sin(th));
+      if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) continue;
+      if ((x - cx) ** 2 + (y - cy) ** 2 < 3 * 3) continue; // 四瓣在圆心交汇 → 挖空中心避免拥挤
+      const k = y * gridCols + x; if (seen.has(k)) continue; seen.add(k); cells.push({ x, y });
+    }
     return cells;
   }
 
   // 形状自身动态：直接改 displayX/Y（在 motion 设好显示位之后叠加）。t = 秒。
+  const cen = () => ({ cx: (gridCols - 1) / 2 * CC(), cy: (gridRows - 1) / 2 * CC() });
   const ANIMS = {
     wave:   (c, t) => { c.displayY += Math.sin(c.gridX * 0.36 + t * 1.9) * CC() * 4.2; },
     ripple: (c, t) => { c.displayY += Math.sin(c.gridX * 0.5 - t * 2.3 + c.gridY * 0.55) * CC() * 1.7; },
@@ -376,11 +419,32 @@ document.addEventListener('DOMContentLoaded', () => {
                  + Math.sin(t * 0.6) * CC() * 1.2; // 整体轻微摇摆
     },
     pulse:  (c, t) => {
-      const cx = (gridCols - 1) / 2 * CC(), cy = (gridRows - 1) / 2 * CC();
+      const { cx, cy } = cen();
       const bx = c.gridX * CC() - cx, by = c.gridY * CC() - cy;
       const rad = Math.hypot(bx, by) || 1;
       const off = Math.sin(rad * 0.10 - t * 3.0) * CC() * 1.9; // 向外扩散的脉动
       c.displayX += (bx / rad) * off; c.displayY += (by / rad) * off;
+    },
+    // 旋涡：绕中心差速旋转（内圈快、外圈慢）→ 漩涡卷动。
+    vortex: (c, t) => {
+      const { cx, cy } = cen();
+      const bx = c.gridX * CC() - cx, by = c.gridY * CC() - cy;
+      const rad = Math.hypot(bx, by);
+      const a = Math.atan2(by, bx) + t * 1.0 + (60 - rad) * 0.012;
+      c.displayX = cx + rad * Math.cos(a); c.displayY = cy + rad * Math.sin(a);
+    },
+    // 绸缎：二维行波（横纵两个正弦叠加）→ 像一片随风起伏的布。
+    cloth: (c, t) => {
+      c.displayY += Math.sin(c.gridX * 0.5 + t * 2.0) * CC() * 1.7
+                  + Math.cos(c.gridY * 0.45 + t * 1.5) * CC() * 1.3;
+    },
+    // 脉动花：整朵旋转 + 半径周期缩放 → 一开一合的绽放。
+    bloom: (c, t) => {
+      const { cx, cy } = cen();
+      const bx = c.gridX * CC() - cx, by = c.gridY * CC() - cy;
+      const rad = Math.hypot(bx, by);
+      const s = 1 + 0.24 * Math.sin(t * 1.8), a = Math.atan2(by, bx) + t * 0.5;
+      c.displayX = cx + rad * s * Math.cos(a); c.displayY = cy + rad * s * Math.sin(a);
     },
   };
 
@@ -448,15 +512,17 @@ document.addEventListener('DOMContentLoaded', () => {
     motion.setTextLine(cells, S.map(c => c.id));
   }
 
-  // 动态 → 原态：把在册里字钉成文本行。若之前设过原态文本，按其内容/顺序还原（内容不变）。
+  // 动态 → 原态：回归文本行。若设过原态文本，按其"原本内容/长度"还原 —— 即去掉动态自适应
+  // 多出来的里字（螺旋淡出）、补回缺的，呈现原本那段话，而不是把多出的字也塞进文本行。
   function enterOrigin() {
     if (inOrigin) return;
+    if (aliveIds().length === 0) return;
+    if (lastOriginText) { formOriginText(lastOriginText); return; }
     stopClock(); currentAnim = null;
     clearTimeout(scatterTimer);
     if (motion.isOrbiting()) motion.endOrbit();
-    if (aliveIds().length === 0) return;
     inOrigin = true; shapeActive = false;
-    layoutOrigin(true);
+    layoutOrigin(false);
     console.log(`→ 原态文本行 (${aliveIds().length} 里字)`);
   }
 
@@ -568,10 +634,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 动态曲线（形状自身动态）
     const r6 = row(); r6.append(makeLabel('动态曲线'));
-    const anims = [['正弦波', 'wave', buildWaveCells, 0.9], ['水波', 'ripple', buildRippleCells, 0.85],
-                   ['DNA双螺旋', 'dna', buildDnaCells, 0.85], ['涟漪', 'pulse', buildDiskCells, 0.7]];
-    for (const [label, anim, build, fill] of anims)
-      r6.append(mkBtn(label, () => formSampled({ mask: build(), constraint: 'strict', fill, anim }, label)));
+    const anims = [['正弦波', 'wave', buildWaveCells], ['水波', 'ripple', buildRippleCells],
+                   ['DNA双螺旋', 'dna', buildDnaCells], ['涟漪', 'pulse', buildDiskCells],
+                   ['旋涡', 'vortex', buildDiskCells], ['绸缎', 'cloth', buildBlockCells],
+                   ['脉动花', 'bloom', buildRoseCells]];
+    for (const [label, anim, build] of anims)
+      r6.append(mkBtn(label, () => formSampled({ mask: build(), anim }, label)));
 
     // 原态文本（内容/长度自适应，模拟 AI 回答）
     const r5 = row(); r5.append(makeLabel('原态'));
