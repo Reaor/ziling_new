@@ -23,6 +23,7 @@ import { CharacterPool } from './core/character.js';
 import { MotionEngine } from './core/motion.js';
 import { ShapeSystem, EMOJI_TEMPLATES } from './core/shape.js';
 import { GestureRecognizer } from './input/gestures.js';
+import * as ai from './ai/bridge.js';
 
 const CELL_SIZE = 11;          // 网格分辨率：实心多排里字定形；格子适中→笔画有 2~3 排里字、复杂字也分得开
 const FONT_SIZE = 10;          // 里字字号：必须 ≤ CELL_SIZE(11) 才不溢出格子；留 1px 余白→相邻里字不糊、清爽不重叠
@@ -757,12 +758,83 @@ document.addEventListener('DOMContentLoaded', () => {
     formSampled(shapes.sampleCurveOrdered(type, gridCols, gridRows, 110), type);
   }
 
+  // ── 互动态：日程入场（收束 L5）────────────────────────────────────────────
+  // App 通过 setSchedule()/postMessage/URL 传入日程 → 调 AI(或 Mock)得到一句话+颜文字 →
+  // 先呈现颜文字(动态)，再回归原态呈现那句话。无后端/无密钥时 bridge 自动用 Mock。
+  let lastSchedule = null;
+  async function presentSchedule(sch) {
+    lastSchedule = sch;
+    try {
+      const { message, emoji } = await ai.schedule(sch);
+      if (EMOJI_TEMPLATES[emoji]) applyEmojiKey(emoji);   // 先动态颜文字
+      else applyEmojiKey('^_^');
+      setTimeout(() => { if (message) formOriginText(message); }, 2600); // 再回归原态那句话
+    } catch (e) { console.warn('presentSchedule:', e); }
+  }
+  // 暴露给宿主 App：window.setSchedule / postMessage / URL ?schedule=
+  function wireScheduleIntake() {
+    if (typeof window === 'undefined') return;
+    window.setSchedule = (data) => { try { presentSchedule(typeof data === 'string' ? JSON.parse(data) : data); } catch (e) { console.warn(e); } };
+    window.addEventListener('message', (e) => {
+      if (e.data && e.data.type === 'ziling:schedule') window.setSchedule(e.data.payload);
+    });
+    try {
+      const q = new URLSearchParams(location.search).get('schedule');
+      if (q) window.setSchedule(q);
+    } catch { /* ignore */ }
+    if (window.ZILING_CONFIG && window.ZILING_CONFIG.schedule) window.setSchedule(window.ZILING_CONFIG.schedule);
+  }
+
+  // ── 对话态：三阶段（收束 L22；PHASE1 简洁回复→原态 / PHASE2 巨字 / PHASE3 回复流循环）──
+  let convoActive = false, convoHistory = [], convoTimers = [], convoWaitId = null;
+  function clearConvoTimers() { convoTimers.forEach(clearTimeout); convoTimers = []; }
+  function convoLater(fn, ms) { const id = setTimeout(fn, ms); convoTimers.push(id); return id; }
+
+  async function sendConversation(text) {
+    if (!text) return;
+    convoActive = true;
+    clearConvoTimers();
+    if (convoWaitId) clearInterval(convoWaitId);
+    convoHistory.push({ role: 'user', content: text });
+    // 等待期：随机颜文字快速变化（收束 L22 AI 回复有延时，颜文字更活跃）。
+    const keys = Object.keys(EMOJI_TEMPLATES);
+    convoWaitId = setInterval(() => applyEmojiKey(keys[(Math.random() * keys.length) | 0]), 700);
+    applyEmojiKey(keys[(Math.random() * keys.length) | 0]);
+    let data;
+    try { data = await ai.chat(text, convoHistory.slice(-8)); }
+    finally { clearInterval(convoWaitId); convoWaitId = null; }
+    convoHistory.push({ role: 'assistant', content: data.quickReply || '' });
+    runConvoPhases(data);
+  }
+
+  // PHASE1 原态简洁回复 → PHASE2 巨字 → PHASE3 回复流(text 原态 ↔ emoji 颜文字 循环)。
+  function runConvoPhases(data) {
+    clearConvoTimers();
+    if (data.quickReply) formOriginText(data.quickReply);          // PHASE1
+    const mc = data.megachar, dur = (mc && mc.duration) || 3000;
+    convoLater(() => {                                             // PHASE2 巨字
+      if (mc && mc.chars && mc.chars.length) applyMegachar(mc.chars.join(''));
+      convoLater(() => runConvoStream(data.stream || [], 0), dur);  // → PHASE3
+    }, 2600);
+  }
+  function runConvoStream(stream, i) {
+    if (!convoActive || stream.length === 0) return;
+    const seg = stream[i % stream.length];
+    formOriginText(seg.text || '');                                // 段落原态
+    convoLater(() => {
+      if (seg.emoji && EMOJI_TEMPLATES[seg.emoji]) applyEmojiKey(seg.emoji); // 颜文字
+      convoLater(() => runConvoStream(stream, i + 1), 2400);       // 循环下一段
+    }, 2600);
+  }
+  function exitConversation() { convoActive = false; clearConvoTimers(); if (convoWaitId) { clearInterval(convoWaitId); convoWaitId = null; } }
+
   function releaseShape() {
     shapeActive = false;
     inOrigin = false;
     currentAnim = null;
     stopClock();
     stopSnake();
+    exitConversation();   // 离开当前呈现 → 终止对话态进行中的三阶段循环
     currentPaths = null;
     currentCells = [];
     motion.releaseShape();
@@ -991,8 +1063,10 @@ document.addEventListener('DOMContentLoaded', () => {
     formCurrent();
   }
 
+  // 互动态入场：监听宿主 App 日程注入（无则用下面的默认原态）。
+  wireScheduleIntake();
   // 初次进入先呈现原态文本行（收束 L5；内容/长度自适应，后续由 AI 回答驱动）。
-  setTimeout(() => formOriginText('今天已完成三件事还有两项待办慢慢来继续加油'), 800);
+  setTimeout(() => { if (!lastSchedule) formOriginText('今天已完成三件事还有两项待办慢慢来继续加油'); }, 800);
 
   // ── 调试面板（网页快捷查验：任意巨字 / 全部颜文字 / 曲线）─────────────────
   // 接入云端 AI 后即用 applyMegachar/applyEmojiKey 这些入口即时呈现任意字。
@@ -1071,6 +1145,39 @@ document.addEventListener('DOMContentLoaded', () => {
     tin.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') formOriginText(tin.value); });
     r5.append(tin, mkBtn('呈现原态', () => formOriginText(tin.value)));
 
+    // 对话态（接 AI / Mock）：输入消息 → 三阶段呈现。
+    const r7 = row(); r7.append(makeLabel('对话'));
+    const cin = document.createElement('input');
+    cin.type = 'text'; cin.placeholder = '对字灵说点什么…'; cin.maxLength = 80;
+    cin.style.cssText = 'width:150px;padding:5px;border-radius:6px;border:1px solid #3c4f76;'
+      + 'background:#0d1320;color:#fff;font-size:14px;';
+    cin.addEventListener('pointerdown', stop);
+    cin.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') { sendConversation(cin.value.trim()); cin.value = ''; } });
+    r7.append(cin, mkBtn('发送', () => { sendConversation(cin.value.trim()); cin.value = ''; }));
+
+    // 日程模拟（互动态）：跑一遍 schedule → 颜文字 + 原态那句话。
+    const r8 = row(); r8.append(makeLabel('日程'));
+    r8.append(mkBtn('模拟日程反馈', () => presentSchedule({
+      completed: [{ title: '写周报' }, { title: '回邮件' }, { title: '开会' }],
+      pending: [{ title: '改方案' }],
+      delayed: [{ title: '整理文档', reason: '优先级调整' }],
+    })));
+
+    // AI 来源 + 自带 Key（仅存本机 localStorage，绝不上传/不进仓库）。
+    const r9 = row(); r9.append(makeLabel('AI'));
+    const srcSpan = makeLabel('');
+    const refreshSrc = () => { srcSpan.textContent = '来源:' + ai.aiSource(); };
+    refreshSrc();
+    const kin = document.createElement('input');
+    kin.type = 'password'; kin.placeholder = 'DeepSeek key(仅本机)'; kin.value = ai.hasUserKey() ? '••••••' : '';
+    kin.style.cssText = 'width:130px;padding:5px;border-radius:6px;border:1px solid #3c4f76;'
+      + 'background:#0d1320;color:#fff;font-size:13px;';
+    kin.addEventListener('pointerdown', stop);
+    kin.addEventListener('keydown', e => e.stopPropagation());
+    r9.append(srcSpan, kin,
+      mkBtn('存Key', () => { if (kin.value && kin.value !== '••••••') { ai.setUserKey(kin.value.trim()); kin.value = '••••••'; refreshSrc(); } }),
+      mkBtn('清Key', () => { ai.setUserKey(''); kin.value = ''; refreshSrc(); }));
+
     // 杂项
     const r4 = row();
     r4.append(mkBtn('北京时间', () => applyClock()));
@@ -1078,7 +1185,7 @@ document.addEventListener('DOMContentLoaded', () => {
     r4.append(mkBtn('回归原态', () => enterOrigin()));
     r4.append(mkBtn('自由漫游', () => releaseShape()));
 
-    body.append(r1, r2, r3, r6, r5, r4);
+    body.append(r1, r2, r3, r6, r5, r7, r8, r9, r4);
 
     const toggle = mkBtn('调试 ⚙', () => {
       body.style.display = body.style.display === 'none' ? 'flex' : 'none';
