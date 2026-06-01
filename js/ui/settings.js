@@ -59,26 +59,26 @@ export function buildSettings(hooks) {
 
   const s = loadSettings();
 
-  // 1) 深/浅色（默认跟随系统）
-  wrap.append(rowSel('外观', [['跟随系统', 'system'], ['浅色', 'light'], ['深色', 'dark']], s.mode,
+  // 1) 深/浅色（默认跟随系统）—— 下拉
+  wrap.append(rowDropdown('外观', [['跟随系统', 'system'], ['浅色', 'light'], ['深色', 'dark']], s.mode,
     v => { set(LS.mode, v); hooks.setMode(v); }));
 
-  // 2) 字体
-  wrap.append(rowSel('字体', FONTS.map(f => [f.label, f.css]), s.font,
+  // 2) 字体 —— 下拉
+  wrap.append(rowDropdown('字体', FONTS.map(f => [f.label, f.css]), s.font,
     v => { set(LS.font, v); hooks.setFont(v); }));
 
-  // 3) 字色（明度/亮度 = 直接给颜色选择器；空=跟随主题）
+  // 3) 字色（取色器 + 跟随主题）
   const colorRow = row('字色');
   const cpick = document.createElement('input');
   cpick.type = 'color'; cpick.value = s.color || '#e0e0e0';
-  cpick.style.cssText = 'width:42px;height:26px;border:none;background:none;cursor:pointer;';
+  cpick.style.cssText = 'width:40px;height:28px;border:none;background:none;cursor:pointer;border-radius:6px;';
   cpick.addEventListener('input', () => { set(LS.color, cpick.value); hooks.setColor(cpick.value); });
   const cReset = btn('跟随主题', () => { set(LS.color, ''); hooks.setColor(''); });
   colorRow.append(cpick, cReset);
   wrap.append(colorRow);
 
-  // 3b) 特效：呼吸渐变 / 炫彩
-  wrap.append(rowSel('字色特效', FX.map(f => [f.label, f.v]), s.fx,
+  // 3b) 字色特效 —— 下拉
+  wrap.append(rowDropdown('字色特效', FX.map(f => [f.label, f.v]), s.fx,
     v => { set(LS.fx, v); hooks.setFx(v); }));
 
   // 7) 原态字号
@@ -104,9 +104,8 @@ export function buildSettings(hooks) {
   pRow.append(pin, btn('保存', () => ai.setPersona(pin.value.trim())));
   wrap.append(pRow);
 
-  // 5) AI 记忆开关
-  wrap.append(rowSel('AI记忆', [['开', '1'], ['关', '0']], s.memory ? '1' : '0',
-    v => ai.setMemory(v === '1')));
+  // 5) AI 记忆开关 —— 拨动开关（主流逻辑）
+  wrap.append(rowToggle('AI记忆', s.memory, on => ai.setMemory(on)));
 
   // 6) API Key（仅本机 localStorage；上线走后端网关）
   const kRow = row('API Key');
@@ -135,14 +134,30 @@ export function buildSettings(hooks) {
     b.addEventListener('click', e => { stop(e); fn(); });
     return b;
   }
-  function rowSel(label, opts, cur, fn) {
+  // 下拉选择（原生 select，主流移动端设置常见样式）。
+  function rowDropdown(label, opts, cur, fn) {
     const r = row(label);
-    const segs = [];
-    opts.forEach(([t, v]) => {
-      const b = btn(t, () => { fn(v); segs.forEach(s2 => s2.b.style.background = s2.v === v ? '#3a6df0' : '#22304d'); });
-      b.style.background = v === cur ? '#3a6df0' : '#22304d';
-      segs.push({ b, v }); r.append(b);
-    });
+    const sel = document.createElement('select');
+    sel.style.cssText = 'flex:1;min-width:90px;padding:7px 9px;border-radius:8px;border:1px solid #3c4f76;'
+      + 'background:#0d1320;color:#fff;font-size:13px;cursor:pointer;appearance:auto;';
+    opts.forEach(([t, v]) => { const o = document.createElement('option'); o.value = v; o.textContent = t; if (v === cur) o.selected = true; sel.append(o); });
+    sel.addEventListener('pointerdown', stop);
+    sel.addEventListener('change', () => fn(sel.value));
+    r.append(sel);
+    return r;
+  }
+  // 拨动开关（iOS 风格圆钮）。
+  function rowToggle(label, on, fn) {
+    const r = row(label);
+    const track = el('div', `width:46px;height:26px;border-radius:13px;cursor:pointer;flex:none;position:relative;`
+      + `transition:background .2s;background:${on ? '#3a6df0' : '#41506e'};`);
+    const knob = el('div', 'position:absolute;top:3px;width:20px;height:20px;border-radius:50%;background:#fff;'
+      + `transition:left .2s;left:${on ? '23px' : '3px'};box-shadow:0 1px 3px rgba(0,0,0,0.4);`);
+    track.append(knob);
+    let state = on;
+    track.addEventListener('pointerdown', stop);
+    track.addEventListener('click', () => { state = !state; track.style.background = state ? '#3a6df0' : '#41506e'; knob.style.left = state ? '23px' : '3px'; fn(state); });
+    r.append(track);
     return r;
   }
 }
