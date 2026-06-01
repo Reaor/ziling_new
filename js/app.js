@@ -207,6 +207,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let shapeIndex = 0;
   let shapeActive = false;
   let inOrigin = false;         // 原态（文本行）态：长按进入；点/双击/拖动回到动态形状
+  let booted = false;           // 是否已完成冷启动首帧成形（首帧静默回收播种里字，不走退场动画）
   let currentAnim = null;       // 动态曲线的"形状自身动态"函数 (char,t)=>void（显示层）；无则 null
   let animDirty = false;        // 用过 anim 亮度乘子 → 离开时需清一次
   let snakeTimer = null;        // 贪吃蛇：每步重排掩码的定时器（里字沿格子滑动跟随）
@@ -317,6 +318,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const ctr = maskCenterPx(mask);
     const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE;
     const reach = Math.hypot(W, H);           // 飞到屏幕外的距离
+    // 「清空半径」：正在成形的目标（形状/文本）外接圈 + 余量。退场里字在此圈内越靠中心越透明
+    //  → 不遮挡正在呈现的原态/形状；出了圈才完全显形、再随飞出渐隐（既不挡又保留出场效果）。
+    const clearR = Math.max(CELL_SIZE * 4, shapeRadiusPx(mask, ctr) + CELL_SIZE * 2.5);
     const victims = aliveChars().slice(0, count);
     victims.forEach((c, k) => {
       transitIds.add(c.id);
@@ -326,7 +330,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!isFinite(ang) || (Math.abs(sx - ctr.x) < 1 && Math.abs(sy - ctr.y) < 1)) ang = Math.random() * Math.PI * 2;
       const fx = sx + Math.cos(ang) * reach, fy = sy + Math.sin(ang) * reach;
       const rank = Math.floor(k / SPIRAL_ARMS);
-      transit.push({ char: c, mode: 'out', sx, sy, fx, fy, ang,
+      transit.push({ char: c, mode: 'out', sx, sy, fx, fy, ang, cx: ctr.x, cy: ctr.y, clearR,
         elapsed: -rank * SPIRAL_STAGGER_MS, dur: SPIRAL_MS });
     });
     if (victims.length) reformPending = true;
@@ -376,9 +380,12 @@ document.addEventListener('DOMContentLoaded', () => {
         // 向外退场：从当前位置朝远离中心方向**加速飞出**（ease-in），中途即淡出 → 干净离场。
         const e = p * p;                                  // ease-in：起步顺、越走越快地离开
         const swirl = Math.sin(p * Math.PI * 2) * CELL_SIZE * 0.6 * (1 - p); // 轻微弧线，不死板
-        a.char.displayX = a.sx + (a.fx - a.sx) * e - Math.sin(a.ang) * swirl - CELL_SIZE / 2;
-        a.char.displayY = a.sy + (a.fy - a.sy) * e + Math.cos(a.ang) * swirl - CELL_SIZE / 2;
-        a.char.alpha = 1 - e;                             // 随飞出渐隐
+        const dx = a.sx + (a.fx - a.sx) * e, dy = a.sy + (a.fy - a.sy) * e; // 当前中心像素位
+        a.char.displayX = dx - Math.sin(a.ang) * swirl - CELL_SIZE / 2;
+        a.char.displayY = dy + Math.cos(a.ang) * swirl - CELL_SIZE / 2;
+        // 透明度 = 出场渐隐(1-e) × 离中心程度：越靠近正在成形的中心越透明，不遮挡原态；出了清空圈才完全显形。
+        const prox = a.clearR ? Math.min(1, Math.hypot(dx - a.cx, dy - a.cy) / a.clearR) : 1;
+        a.char.alpha = (1 - e) * prox;
       }
       if (p >= 1) {
         if (a.mode === 'in') finalizeSpiralIn(a);
@@ -1093,8 +1100,16 @@ document.addEventListener('DOMContentLoaded', () => {
     const maskCells = L.pos.map(p => ({ x: Math.round(p.x / CELL_SIZE), y: Math.round(p.y / CELL_SIZE) }));
     // 里字数 → n：多了螺旋淡出、少了螺旋淡入（与过渡并行）。淡入的字在 finalize 后随下一轮归位。
     const cur = aliveChars().length;
-    if (cur > n) despawnSpiralOut(cur - n, maskCells);
-    else if (cur < n) spawnSpiralIn(n - cur, maskCells);
+    if (cur > n) {
+      if (!booted) {
+        // 冷启动首帧：多出来的是开屏期间 alpha=0 的播种里字（从未显形）。直接静默回收，
+        // 否则它们会被退场动画重新点亮 → 出现"开头神秘字块快速出场"的突兀感。
+        aliveChars().slice(n).forEach(c => { motion.unregisterCharacter(c.id); pool.release(c.id); });
+      } else {
+        despawnSpiralOut(cur - n, maskCells);
+      }
+    } else if (cur < n) spawnSpiralIn(n - cur, maskCells);
+    booted = true;
     // 用"当前已在册（不含正螺旋过渡）"的里字走文本过渡；内容按文本顺序赋上。
     const alive = aliveChars();
     alive.forEach((c, i) => { c.char = content[i % content.length]; });
@@ -1643,7 +1658,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const strokes = [hat(cx - eyeGap / 2)];
     if (winking) strokes.push([[cx + eyeGap / 2 - eyeW / 2, eyeY + eyeW * 0.12], [cx + eyeGap / 2, eyeY + eyeW * 0.5], [cx + eyeGap / 2 + eyeW / 2, eyeY + eyeW * 0.12]]);
     else strokes.push(hat(cx + eyeGap / 2));
-    strokes.push([[cx - S * 0.34, cy + S * 0.40], [cx, cy + S * 0.56], [cx + S * 0.34, cy + S * 0.40]]); // 嘴
+    strokes.push([[cx - S * 0.34, cy + S * 0.34], [cx + S * 0.34, cy + S * 0.34]]); // 嘴：^_^ 的"_"是平横线
     return strokes;
   }
   function buildIntroLines(W, H, cx, cy) {

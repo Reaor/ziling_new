@@ -35,17 +35,44 @@ const WORDS = new Set(WORD_LIST);
 // 单字池 = 词库里所有出现过的字（保证棋盘里的字大多能两两组成词，减少"凑不出"的挫败）。
 const POOL = [...new Set(WORD_LIST.join('').split(''))];
 
+// 计分持久化（跨开关记忆；后端如自管分数可传 opts.persistScore=false 关闭）。
+const LS_SCORE = 'ziling.game.score';
+const loadScore = () => { try { return parseInt(localStorage.getItem(LS_SCORE), 10) || 0; } catch { return 0; } };
+const saveScore = (v) => { try { localStorage.setItem(LS_SCORE, String(v)); } catch { /* ignore */ } };
+
+/**
+ * 外观主题默认值 —— **整套 UI（含网格、配色、圆角、阴影、文案）都在这里，后端可整体替换/微调**：
+ * `new WordMatch(mount, { theme: { cellBg:'...', cellRadius:'...', ... } })`，传入的键覆盖默认值。
+ * 颜色默认走主题变量 var(--zl-fg)/var(--zl-bg)，自动跟随字灵的深浅色与自定义字色。
+ */
+export const GAME_THEME = {
+  fg: 'var(--zl-fg)', bg: 'var(--zl-bg)',
+  title: '字 · 消',
+  hint: '点两个能组成词的字即可消除（顺序不论·再点取消）',
+  boardMax: '420px', boardVw: '92vw',  // 棋盘最大边 / 视口占比
+  gap: '5px', pad: '8px', radius: '16px',
+  boardBg: 'rgba(127,127,127,0.08)', boardShadow: '0 6px 24px rgba(0,0,0,0.18)',
+  cellBg: 'rgba(127,127,127,0.10)', cellBorder: '1px solid rgba(127,127,127,0.25)',
+  cellRadius: '9px', cellFontSize: 'min(6vw,26px)',
+  activeRing: '0 0 0 2px var(--zl-fg) inset', activeScale: 1.06,
+  scoreBg: 'rgba(127,127,127,0.12)',
+};
+
 export class WordMatch {
   /**
    * @param {HTMLElement} mount 挂载容器（游戏层覆盖在 canvas 之上）
-   * @param {object} opts { size=8, fontCss, onExit }
+   * @param {object} opts { size=8, fontCss, onExit, theme, persistScore }
+   *   - theme: 覆盖 GAME_THEME 的部分键，便于后端整体改版/替换 UI（含网格）。
+   *   - persistScore: 默认 true → 分数记忆到 localStorage，下次打开继续累计。
    */
   constructor(mount, opts = {}) {
     this.mount = mount;
     this.size = opts.size || 8;
     this.fontCss = opts.fontCss || 'inherit';
     this.onExit = opts.onExit || (() => {});
-    this.score = 0;
+    this.theme = { ...GAME_THEME, ...(opts.theme || {}) };
+    this.persist = opts.persistScore !== false;
+    this.score = this.persist ? loadScore() : 0;   // 记忆上次得分
     this.sel = null;          // 当前选中的 {r,c,el}
     this.busy = false;        // 等 AI 判定时禁止新点击
     this.cells = [];          // r*size+c → {ch, el}
@@ -53,10 +80,11 @@ export class WordMatch {
   }
 
   open() {
+    const t = this.theme;
     const root = document.createElement('div');
     root.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;'
       + 'align-items:center;justify-content:center;gap:14px;padding:18px 10px;'
-      + 'background:var(--zl-bg);color:var(--zl-fg);box-sizing:border-box;z-index:5;';
+      + `background:${t.bg};color:${t.fg};box-sizing:border-box;z-index:5;`;
     root.addEventListener('pointerdown', e => e.stopPropagation());
 
     // 脉动等待 keyframes（作用域仅本覆盖层）。
@@ -66,27 +94,27 @@ export class WordMatch {
 
     // 顶部：标题 + 计分胶囊 + 退出
     const top = document.createElement('div');
-    top.style.cssText = 'width:100%;max-width:420px;display:flex;justify-content:space-between;align-items:center;gap:8px;';
+    top.style.cssText = `width:100%;max-width:${t.boardMax};display:flex;justify-content:space-between;align-items:center;gap:8px;`;
     const title = document.createElement('div');
-    title.textContent = '字 · 消'; title.style.cssText = 'font-size:17px;font-weight:600;letter-spacing:3px;opacity:0.9;';
+    title.textContent = t.title; title.style.cssText = 'font-size:17px;font-weight:600;letter-spacing:3px;opacity:0.9;';
     this.scoreEl = document.createElement('div');
     this.scoreEl.style.cssText = 'flex:1;text-align:center;font-size:15px;font-weight:600;letter-spacing:1px;'
-      + 'padding:6px 0;border-radius:11px;background:rgba(127,127,127,0.12);';
+      + `padding:6px 0;border-radius:11px;background:${t.scoreBg};`;
     this._renderScore();
     const exit = document.createElement('button');
     exit.textContent = '✕';
-    exit.style.cssText = pill() + 'width:36px;height:36px;padding:0;font-size:15px;';
+    exit.style.cssText = pill(t) + 'width:36px;height:36px;padding:0;font-size:15px;';
     exit.addEventListener('pointerdown', e => e.stopPropagation());
     exit.addEventListener('click', () => this.close());
     top.append(title, this.scoreEl, exit);
     root.append(top);
 
-    // 棋盘（带柔和外框、毛玻璃底）
+    // 棋盘（带柔和外框、毛玻璃底）—— 网格样式全部取自 theme，后端可整体替换。
     const board = document.createElement('div');
     const n = this.size;
-    board.style.cssText = `display:grid;grid-template-columns:repeat(${n},1fr);gap:5px;`
-      + 'width:min(92vw,420px);aspect-ratio:1;padding:8px;border-radius:16px;'
-      + 'background:rgba(127,127,127,0.08);box-shadow:0 6px 24px rgba(0,0,0,0.18);';
+    board.style.cssText = `display:grid;grid-template-columns:repeat(${n},1fr);gap:${t.gap};`
+      + `width:min(${t.boardVw},${t.boardMax});aspect-ratio:1;padding:${t.pad};border-radius:${t.radius};`
+      + `background:${t.boardBg};box-shadow:${t.boardShadow};`;
     this.board = board;
     for (let i = 0; i < n * n; i++) {
       const cell = document.createElement('div');
@@ -102,7 +130,7 @@ export class WordMatch {
 
     const hint = document.createElement('div');
     hint.style.cssText = 'font-size:12px;opacity:0.55;';
-    hint.textContent = '点两个能组成词的字即可消除（顺序不论·再点取消）';
+    hint.textContent = t.hint;
     root.append(hint);
 
     this.mount.append(root);
@@ -115,16 +143,20 @@ export class WordMatch {
   }
 
   _cellCss(active) {
+    const t = this.theme;
     return 'display:flex;align-items:center;justify-content:center;'
-      + `font-family:${this.fontCss};font-size:min(6vw,26px);`
-      + 'border-radius:9px;border:1px solid rgba(127,127,127,0.25);'
-      + 'background:rgba(127,127,127,0.10);cursor:pointer;user-select:none;'
+      + `font-family:${this.fontCss};font-size:${t.cellFontSize};color:${t.fg};`
+      + `border-radius:${t.cellRadius};border:${t.cellBorder};`
+      + `background:${t.cellBg};cursor:pointer;user-select:none;`
       + 'transition:transform .15s,background .2s,box-shadow .2s,opacity .25s;'
-      + (active ? 'box-shadow:0 0 0 2px var(--zl-fg) inset;transform:scale(1.06);' : '');
+      + (active ? `box-shadow:${t.activeRing};transform:scale(${t.activeScale});` : '');
   }
 
   _randChar() { return POOL[(Math.random() * POOL.length) | 0]; }
-  _renderScore() { this.scoreEl.textContent = `得分 ${this.score}`; }
+  _renderScore() {
+    this.scoreEl.textContent = `得分 ${this.score}`;
+    if (this.persist) saveScore(this.score);   // 记忆，下次打开继续
+  }
 
   _tap(i) {
     if (this.busy) return;                       // 判定中（等 AI）不接受新点击
@@ -207,8 +239,8 @@ export class WordMatch {
   }
 }
 
-function pill() {
+function pill(t = GAME_THEME) {
   return 'padding:7px 12px;border-radius:12px;border:1px solid rgba(127,127,127,0.3);'
-    + 'background:rgba(127,127,127,0.12);color:var(--zl-fg);font-size:13px;cursor:pointer;'
+    + `background:${t.scoreBg};color:${t.fg};font-size:13px;cursor:pointer;`
     + 'backdrop-filter:blur(6px);';
 }
