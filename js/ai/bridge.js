@@ -106,14 +106,21 @@ export async function schedule(sch) {
   return mockSchedule(sch);
 }
 
-/** 对话态：用户消息 → { quickReply, megachar, stream }。记忆关闭时不带 history。 */
-export async function chat(message, history = []) {
+/**
+ * 对话态：用户消息 → { quickReply, megachar, stream }。记忆关闭时不带 history。
+ * @param {object} [ctx] 上下文：{ schedule } 当前日程 → 让 AI 能基于用户日程/习惯给专业回答。
+ */
+export async function chat(message, history = [], ctx = {}) {
   const hist = memoryOn() ? history : [];
+  const schedule = ctx && ctx.schedule || null;
   try {
-    if (aiSource() === 'backend') return await backend('/api/chat', { message, history: hist, persona: getPersona() });
-    if (aiSource() === 'direct') return await direct(SYSTEM_PROMPT_CHAT + personaLine(), message);
+    if (aiSource() === 'backend') return await backend('/api/chat', { message, history: hist, persona: getPersona(), schedule });
+    if (aiSource() === 'direct') {
+      const sched = schedule ? `\n【用户当前日程】${JSON.stringify(schedule)}。回答涉及日程的问题时请据此给出基于其实际安排/习惯的具体建议。` : '';
+      return await direct(SYSTEM_PROMPT_CHAT + personaLine() + sched, message);
+    }
   } catch (e) { console.warn('[ai] chat fallback to mock:', e.message); }
-  return mockChat(message, hist);
+  return mockChat(message, hist, schedule);
 }
 
 /** 游戏态：组词判定 → { valid, word? } */

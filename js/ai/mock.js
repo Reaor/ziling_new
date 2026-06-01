@@ -39,9 +39,25 @@ export function mockSchedule(schedule = {}) {
   return { message, emoji };
 }
 
-/** 对话态：根据用户消息情绪给 quickReply + 巨字 + 回复流。 */
-export function mockChat(message = '', history = []) {
+/** 对话态：根据用户消息情绪给 quickReply + 巨字 + 回复流。schedule 存在且问到日程相关时，给基于日程的建议。 */
+export function mockChat(message = '', history = [], schedule = null) {
   const text = String(message);
+  // 问到日程/安排/计划/待办类问题 → 基于当前日程给具体建议（Mock 版；真实由后端 LLM 据日程作答）。
+  if (schedule && /日程|安排|计划|待办|任务|怎么办|先做|优先|时间管理|effic|规划/.test(text)) {
+    const d = (schedule.completed || []).length, p = (schedule.pending || []).length, l = (schedule.delayed || []).length;
+    const pend = (schedule.pending || [])[0], late = (schedule.delayed || [])[0];
+    const focus = late ? (late.title || '拖延的那件') : pend ? (pend.title || '待办的第一件') : '当下最近的一件';
+    return {
+      quickReply: `先做「${focus}」，其余顺势推进`,
+      megachar: { chars: ['先做'], direction: 'vertical', rotateInterval: 0, duration: 3200 },
+      stream: [
+        { text: `你今天完成 ${d} 件、待办 ${p} 件、拖延 ${l} 件`, emoji: '-_-' },
+        { text: `建议先啃「${focus}」，它最影响后续`, emoji: '^.^' },
+        { text: '给它一个明确的小起点，5 分钟就行', emoji: '(^_^)/' },
+        { text: '其余的按截止时间排，不必都今天', emoji: '^_^' },
+      ],
+    };
+  }
   const neg = /累|烦|难过|压力|拖延|焦虑|怕|哭|烦躁|不想/.test(text);
   const happy = /开心|高兴|完成|搞定|耶|棒|爽|成功/.test(text);
   const mood = neg ? 'neg' : happy ? 'pos' : 'neu';
