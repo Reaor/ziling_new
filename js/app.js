@@ -27,6 +27,7 @@ import { MotionEngine } from './core/motion.js';
 import { ShapeSystem, EMOJI_TEMPLATES } from './core/shape.js';
 import { GestureRecognizer } from './input/gestures.js';
 import * as ai from './ai/bridge.js';
+import { buildSettings, loadSettings } from './ui/settings.js';
 
 const CELL_SIZE = 11;          // 网格分辨率：实心多排里字定形；格子适中→笔画有 2~3 排里字、复杂字也分得开
 const FONT_SIZE = 10;          // 里字字号：必须 ≤ CELL_SIZE(11) 才不溢出格子；留 1px 余白→相邻里字不糊、清爽不重叠
@@ -82,13 +83,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const rootStyle = (typeof getComputedStyle !== 'undefined' && document.documentElement)
     ? () => getComputedStyle(document.documentElement) : () => ({ getPropertyValue: () => '' });
   let glyphFont = '"PingFang SC", "Microsoft YaHei", sans-serif';
+  let glyphColorOverride = '';   // 设置页自定义字色（空=跟随主题 --zl-fg）
+  let themeFx = 'none';          // 'none' | 'breathe' | 'rainbow'（在渲染层处理）
   function getThemeFg() {
+    if (themeFx === 'rainbow') return '#e34a6f';   // 炫彩：烘一个饱和基色，渲染层再 hue-rotate 循环
+    if (glyphColorOverride) return glyphColorOverride;
     const v = (rootStyle().getPropertyValue('--zl-fg') || '').trim();
     return v || '#e0e0e0';
   }
   function resetGlyphCache() { glyphCache = new Map(); }
   // 位图缓存按 CELL_SIZE 显示框 + 额外超采样（SS）烘制：原态放大到 ~1.7× 时仍清晰不糊。
-  const GLYPH_SS = Math.max(2, Math.ceil((ORIGIN_FONT / FONT_SIZE) * DPR));
+  const GLYPH_SS = Math.max(2, Math.ceil((ORIGIN_FONT / FONT_SIZE) * 1.8 * DPR)); // 覆盖原态最大放大倍率→放大也清晰
   function getGlyph(ch) {
     let g = glyphCache.get(ch);
     if (g) return g;
@@ -105,6 +110,20 @@ document.addEventListener('DOMContentLoaded', () => {
     glyphCache.set(ch, cv);
     return cv;
   }
+
+  // ── 主题应用（设置页通过这些 hook 即时生效）─────────────────────────────
+  // 深/浅色：写 --zl-bg/--zl-fg（'system' 时清除覆盖→回落到 CSS 的系统媒体查询）。
+  const THEME = { light: { bg: '#f5f5f0', fg: '#1a1a1a' }, dark: { bg: '#15151f', fg: '#e6e6ea' } };
+  function applyThemeMode(mode) {
+    const root = document.documentElement.style;
+    if (mode === 'light' || mode === 'dark') { root.setProperty('--zl-bg', THEME[mode].bg); root.setProperty('--zl-fg', THEME[mode].fg); }
+    else { root.removeProperty('--zl-bg'); root.removeProperty('--zl-fg'); } // system
+    resetGlyphCache();
+  }
+  function applyFont(css) { glyphFont = css || glyphFont; resetGlyphCache(); }
+  function applyColor(hex) { glyphColorOverride = hex || ''; resetGlyphCache(); }
+  function applyFx(v) { themeFx = v || 'none'; resetGlyphCache(); }
+  function applyOriginScale(v) { originScale = Math.max(0.6, Math.min(1.8, v || 1)); }
 
   // ── Seed characters in a loose central block ──────────────
   let glyphSeq = 0;
@@ -186,7 +205,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // 拖动那样聚成一个"旋转的方形团"，停在要呈现的文本行上方（不与之重叠）；随后团里的字沿
   // 边沿逐个放大、飞出排进下方正在变长的文本行；随着字陆续排出，方形团旋转**逐步加速**。
   // 反向（原态→动态）= 时间反演：文本里字逐个缩回旋转方形团，再聚为动态形状。
-  const ORIGIN_CELL = ORIGIN_FONT + 3;    // 原态每字占位（含间距）
+  let originScale = 1;                     // 原态字号倍率（设置页可调 0.6~1.8）
+  const originMag = () => (ORIGIN_FONT / FONT_SIZE) * originScale;  // 原态相对里字的放大倍数
+  const originCell = () => Math.round((ORIGIN_FONT * originScale) + 3); // 原态每字占位（含间距）
   const ORIGIN_MS = 2200;                 // 过渡时长（慢一点、看得清楚、丝滑）
   const CLUSTER_CELL = CELL_SIZE + 2;     // 方环团里每环间距（小，紧凑成团）
   let originAnim = null;   // 进行中的过渡：{dir,t,phase,chars,layout,square,clusterC,after}
@@ -195,19 +216,20 @@ document.addEventListener('DOMContentLoaded', () => {
   // 居中自动换行的放大文本布局（像素中心点），整体下移到屏幕下部，给上方旋转方形团留位。
   function originPixelLayout(n) {
     const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE, pad = 8;
-    const perRow = Math.max(1, Math.floor((W - pad * 2) / ORIGIN_CELL));
+    const OC = originCell();
+    const perRow = Math.max(1, Math.floor((W - pad * 2) / OC));
     const rowsN = Math.ceil(n / perRow);
-    const blockH = rowsN * ORIGIN_CELL;
+    const blockH = rowsN * OC;
     // 文本块放在屏幕中部偏下：顶部约 H*0.42，方形团置于其上方。
-    const startY = Math.max(H * 0.42, H * 0.34) + ORIGIN_CELL / 2;
+    const startY = Math.max(H * 0.42, H * 0.34) + OC / 2;
     const pos = [];
     for (let i = 0; i < n; i++) {
       const r = Math.floor(i / perRow);
       const rc = (r === rowsN - 1) ? (n - r * perRow) : perRow;
-      const sx = (W - rc * ORIGIN_CELL) / 2 + ORIGIN_CELL / 2;
-      pos.push({ x: sx + (i - r * perRow) * ORIGIN_CELL, y: startY + r * ORIGIN_CELL });
+      const sx = (W - rc * OC) / 2 + OC / 2;
+      pos.push({ x: sx + (i - r * perRow) * OC, y: startY + r * OC });
     }
-    return { pos, textTopY: startY - ORIGIN_CELL / 2, blockH };
+    return { pos, textTopY: startY - OC / 2, blockH };
   }
 
   // ── 里字自适应 = 螺旋淡入/淡出（显示层动画，绕开 PIBT，收束 L4）──────────
@@ -1096,7 +1118,7 @@ document.addEventListener('DOMContentLoaded', () => {
           const e = easeIO(le), tg = A.layout[it.idx];
           it.c.displayX = (it.depX + (tg.x - it.depX) * e) - CELL_SIZE / 2;
           it.c.displayY = (it.depY + (tg.y - it.depY) * e) - CELL_SIZE / 2;
-          it.c.dispScale = 1 + (ORIGIN_FONT / FONT_SIZE - 1) * e;
+          it.c.dispScale = 1 + (originMag() - 1) * e;
         }
         it.c.alpha = 1; it.c.animA = 1; it.c.flowFade = 1;
       }
@@ -1111,7 +1133,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const tg = A.layout[it.idx];
         it.c.displayX = (tg.x + (rp.x - tg.x) * rs) - CELL_SIZE / 2;
         it.c.displayY = (tg.y + (rp.y - tg.y) * rs) - CELL_SIZE / 2;
-        it.c.dispScale = (ORIGIN_FONT / FONT_SIZE) + (1 - ORIGIN_FONT / FONT_SIZE) * rs; // 大→1
+        it.c.dispScale = originMag() + (1 - originMag()) * rs; // 大→1
         it.c.alpha = 1; it.c.animA = 1; it.c.flowFade = 1;
       }
       if (A.t >= 1) {
@@ -1153,7 +1175,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const p = originHold.layout[it.idx];
       it.c.displayX = p.x - CELL_SIZE / 2 + ox;
       it.c.displayY = p.y - CELL_SIZE / 2 + oy;
-      it.c.dispScale = ORIGIN_FONT / FONT_SIZE;
+      it.c.dispScale = originMag();
       it.c.alpha = 1; it.c.animA = 1; it.c.flowFade = 1;
     }
   }
@@ -1216,34 +1238,51 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!overlay) return;
     const stop = e => e.stopPropagation();
 
+    // 高级感"毛玻璃药丸"按钮基样式（悬浮微亮、按下回弹，柔和过渡）。
+    const PILL = 'border-radius:13px;border:1px solid rgba(255,255,255,0.14);'
+      + 'background:rgba(28,32,48,0.55);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);'
+      + 'color:#eef2fb;box-shadow:0 2px 10px rgba(0,0,0,0.28);cursor:pointer;'
+      + 'transition:transform .18s cubic-bezier(.2,.8,.2,1),background .2s,opacity .2s;';
+    const press = (b) => {
+      b.addEventListener('pointerdown', () => { b.style.transform = 'scale(0.92)'; });
+      const up = () => { b.style.transform = 'scale(1)'; };
+      b.addEventListener('pointerup', up); b.addEventListener('pointerleave', up);
+    };
+
     // 左上：游戏态入口（本期游戏态未实现 → 点了给提示，保留位置与交互）。
     const gameBtn = document.createElement('button');
-    gameBtn.textContent = '游戏';
+    gameBtn.textContent = '🎮';
     gameBtn.title = '进入游戏态（本期未实现）';
-    gameBtn.style.cssText = 'position:absolute;left:8px;top:8px;width:38px;height:38px;'
-      + 'border-radius:10px;background:rgba(34,48,77,0.85);color:#cfe0ff;border:1px solid #3c4f76;'
-      + 'font-size:13px;cursor:pointer;';
-    gameBtn.addEventListener('pointerdown', stop);
+    gameBtn.style.cssText = 'position:absolute;left:10px;top:10px;width:40px;height:40px;font-size:17px;' + PILL;
+    gameBtn.addEventListener('pointerdown', stop); press(gameBtn);
     gameBtn.addEventListener('click', e => { stop(e); toast('游戏态后续开放'); });
 
-    // 左下：对话态入口（点击展开输入框 → 发送进入对话态三阶段；收起退出）。
+    // 左下：对话态入口（点击展开输入框 → 发送进入对话态三阶段；收起退出）。输入框宽度平滑展开。
     const convoWrap = document.createElement('div');
-    convoWrap.style.cssText = 'position:absolute;left:8px;bottom:8px;display:flex;gap:6px;align-items:center;';
+    convoWrap.style.cssText = 'position:absolute;left:10px;bottom:10px;display:flex;gap:7px;align-items:center;';
     const convoBtn = document.createElement('button');
     convoBtn.textContent = '💬';
-    convoBtn.style.cssText = 'width:38px;height:38px;border-radius:10px;'
-      + 'background:rgba(34,48,77,0.85);color:#fff;border:1px solid #3c4f76;font-size:16px;cursor:pointer;';
+    convoBtn.style.cssText = 'width:40px;height:40px;font-size:18px;flex:none;' + PILL;
     const convoInput = document.createElement('input');
     convoInput.type = 'text'; convoInput.placeholder = '对字灵说…'; convoInput.maxLength = 80;
-    convoInput.style.cssText = 'display:none;width:160px;padding:7px;border-radius:8px;'
-      + 'border:1px solid #3c4f76;background:#0d1320;color:#fff;font-size:14px;';
+    convoInput.style.cssText = 'width:0;padding:0;opacity:0;border-radius:11px;border:1px solid rgba(255,255,255,0.14);'
+      + 'background:rgba(13,19,32,0.7);color:#fff;font-size:14px;outline:none;'
+      + 'transition:width .26s cubic-bezier(.2,.8,.2,1),opacity .22s,padding .26s;';
     const sendBtn = document.createElement('button');
-    sendBtn.textContent = '发送'; sendBtn.style.display = 'none';
-    sendBtn.style.cssText = 'display:none;padding:7px 10px;border-radius:8px;'
-      + 'background:#2e7d5b;color:#fff;border:none;font-size:13px;cursor:pointer;';
+    sendBtn.textContent = '发送';
+    sendBtn.style.cssText = 'width:0;padding:0;opacity:0;height:40px;font-size:13px;overflow:hidden;flex:none;'
+      + 'border-radius:11px;border:1px solid rgba(120,220,170,0.4);background:rgba(46,125,91,0.8);color:#fff;'
+      + 'cursor:pointer;transition:width .26s cubic-bezier(.2,.8,.2,1),opacity .22s,padding .26s;';
+    press(convoBtn); press(sendBtn);
     let convoOpen = false;
-    const openConvo = () => { convoOpen = true; convoInput.style.display = 'block'; sendBtn.style.display = 'inline-block'; convoInput.focus(); };
-    const closeConvo = () => { convoOpen = false; convoInput.style.display = 'none'; sendBtn.style.display = 'none'; exitConversation(); enterOrigin(); };
+    const openConvo = () => { convoOpen = true;
+      convoInput.style.width = '150px'; convoInput.style.padding = '9px'; convoInput.style.opacity = '1';
+      sendBtn.style.width = '52px'; sendBtn.style.padding = '0 8px'; sendBtn.style.opacity = '1';
+      convoBtn.style.background = 'rgba(58,109,240,0.6)'; setTimeout(() => convoInput.focus(), 60); };
+    const closeConvo = () => { convoOpen = false;
+      convoInput.style.width = '0'; convoInput.style.padding = '0'; convoInput.style.opacity = '0';
+      sendBtn.style.width = '0'; sendBtn.style.padding = '0'; sendBtn.style.opacity = '0';
+      convoBtn.style.background = 'rgba(28,32,48,0.55)'; exitConversation(); enterOrigin(); };
     const doSend = () => { const t = convoInput.value.trim(); if (t) { sendConversation(t); convoInput.value = ''; } };
     convoBtn.addEventListener('pointerdown', stop);
     convoBtn.addEventListener('click', e => { stop(e); convoOpen ? closeConvo() : openConvo(); });
@@ -1298,7 +1337,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const body = document.createElement('div');
     body.style.cssText = 'position:absolute;left:6px;right:6px;bottom:6px;display:none;'
       + 'flex-direction:column;gap:5px;padding:7px;background:rgba(8,10,16,0.72);'
-      + 'border-radius:10px;max-height:48%;overflow:auto;backdrop-filter:blur(2px);';
+      + 'border-radius:10px;max-height:48%;overflow:auto;backdrop-filter:blur(2px);'
+      + 'opacity:0;transform:translateY(8px);transition:opacity .24s ease,transform .24s ease;';
     body.addEventListener('pointerdown', stop);
 
     // 任意巨字
@@ -1392,15 +1432,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
     body.append(r1, r2, r3, r6, r5, r7, r8, r9, r4);
 
-    const toggle = mkBtn('调试 ⚙', () => {
-      body.style.display = body.style.display === 'none' ? 'flex' : 'none';
+    // 设置面板（app 内调整页面）：默认呈现这个；可切换到调试台。
+    const settings = buildSettings({
+      setMode: applyThemeMode, setFont: applyFont, setColor: applyColor,
+      setFx: applyFx, setOriginScale: applyOriginScale,
     });
-    toggle.style.position = 'absolute';
-    toggle.style.right = '6px';
-    toggle.style.top = '6px';
-    toggle.style.opacity = '0.8';
 
-    overlay.append(toggle, body);
+    // 给设置面板也加柔和过渡。
+    settings.style.transition = 'opacity .24s ease, transform .24s ease';
+    settings.style.opacity = '0'; settings.style.transform = 'translateY(8px)';
+    // 柔和显隐：show 时先 display 再下一帧淡入；hide 时先淡出再 display:none。
+    const softShow = (elm, show) => {
+      if (show) { elm.style.display = 'flex'; requestAnimationFrame(() => { elm.style.opacity = '1'; elm.style.transform = 'translateY(0)'; }); }
+      else { elm.style.opacity = '0'; elm.style.transform = 'translateY(8px)'; setTimeout(() => { if (elm.style.opacity === '0') elm.style.display = 'none'; }, 240); }
+    };
+    // 右上角双态切换：⚙设置（默认）⇄ 🛠调试台。两个面板互斥显示。
+    let panel = 'settings';   // 'settings' | 'debug' | 'closed'
+    const refreshPanels = () => {
+      softShow(settings, panel === 'settings');
+      softShow(body, panel === 'debug');
+      toggle.textContent = panel === 'debug' ? '调试 🛠' : '设置 ⚙';
+    };
+    const toggle = mkBtn('设置 ⚙', () => {
+      // 关→设置→调试→关 循环（点开默认进设置页；再点切到调试台；再点收起）。
+      panel = panel === 'closed' ? 'settings' : panel === 'settings' ? 'debug' : 'closed';
+      refreshPanels();
+    });
+    toggle.style.cssText = 'position:absolute;right:10px;top:10px;padding:7px 11px;font-size:13px;'
+      + 'border-radius:13px;border:1px solid rgba(255,255,255,0.14);background:rgba(28,32,48,0.55);'
+      + 'backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);color:#eef2fb;'
+      + 'box-shadow:0 2px 10px rgba(0,0,0,0.28);cursor:pointer;transition:transform .18s,background .2s;';
+
+    overlay.append(toggle, settings, body);
+    panel = 'closed'; refreshPanels();   // 初始收起，避免遮挡；点一下进设置页
 
     function makeLabel(t) {
       const s = document.createElement('span');
@@ -1409,6 +1473,13 @@ document.addEventListener('DOMContentLoaded', () => {
       return s;
     }
   }
+
+  // 启动时还原已保存的设置（主题/字体/字色/特效/原态字号）。
+  function applySavedSettings() {
+    const s = loadSettings();
+    applyThemeMode(s.mode); applyFont(s.font); applyColor(s.color); applyFx(s.fx); applyOriginScale(s.originScale);
+  }
+  applySavedSettings();
 
   // ── Drag state ────────────────────────────────────────────
   let dragging = false;
@@ -1675,11 +1746,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // 渲染用**预渲染字形位图 + drawImage**（而非每帧数百次 fillText）→ 大幅降帧耗、消除卡顿。
     const tSec = now / 1000;
     const amp = motion.isOrbiting() ? 0 : microEnv * MICRO_AMP;
+    // 字色特效：breathe=整体明暗呼吸；rainbow=用 hue-rotate 滤镜整体染色(每帧设一次，开销低)。
+    let breathe = 1;
+    if (themeFx === 'breathe') breathe = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(tSec * 1.6));
+    ctx.filter = (themeFx === 'rainbow') ? `hue-rotate(${(tSec * 60) % 360}deg) saturate(2.2)` : 'none';
     let drawn = 0;
     for (const char of pool.getAll()) {
       // 流动淡入/淡出（开放笔画首端淡入、尾端淡出）与螺旋淡入淡出 alpha 相乘。
       const eff = char.alpha * (char.flowFade != null ? char.flowFade : 1)
-                * (char.animA != null ? char.animA : 1);
+                * (char.animA != null ? char.animA : 1) * breathe;
       if (eff > 0.01) {
         drawn++;
         const mx = amp ? Math.sin(tSec * 9 + char.id * 1.3) * amp : 0;
@@ -1692,7 +1767,7 @@ document.addEventListener('DOMContentLoaded', () => {
           char.displayX + mx - off, char.displayY + my - off, sz, sz);
       }
     }
-    ctx.globalAlpha = 1;
+    ctx.globalAlpha = 1; ctx.filter = 'none';
 
     // 安全网：不在过渡/拖动中，却连续多帧"屏幕上几乎没有可见里字"（双击连切等极端竞态导致），
     // 则强制把所有里字 alpha 复位并按当前形状重排 → 自愈，绝不出现"双击后空屏"。
