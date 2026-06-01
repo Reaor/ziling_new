@@ -9,7 +9,8 @@
 
 // Timing thresholds
 const TAP_TIMEOUT = 300;       // ms — max duration for a tap
-const DOUBLE_TAP_WINDOW = 300; // ms — max gap between two taps
+const DOUBLE_TAP_WINDOW = 400; // ms — 两次点击的最大间隔（移动端手指较慢，放宽到 400ms）
+const DOUBLE_TAP_DIST = 44;    // px — 两次点击的最大位移（移动端手指会偏移一两格，按像素容差而非"同一格"）
 const LONG_PRESS_TIME = 650;   // ms — 长按回归原态的判定时长（更长一点→拖着玩不易误触）
 const DRAG_THRESHOLD = 8;      // px — 超过即转为拖动并取消长按（任意拖动都能即时打断长按）
 
@@ -42,7 +43,7 @@ export class GestureRecognizer {
     this._state = STATE.IDLE;
     this._startPos = { x: 0, y: 0 };
     this._lastTapTime = 0;
-    this._lastTapPos = { x: -1, y: -1 };
+    this._lastTapPx = { x: -1e4, y: -1e4 }; // 上一次点击的**像素**位置（双击按像素容差判定）
     this._longPressTimer = null;
     this._tapTimer = null;
 
@@ -155,21 +156,23 @@ export class GestureRecognizer {
     if (this._state === STATE.MAYBE_TAP) {
       const now = Date.now();
       const pos = this.toGrid(this._startPos.x, this._startPos.y);
+      // 双击判定：时间窗内 + 两次点击**像素距离**在容差内（不要求落在同一格 → 移动端手指
+      // 微偏移也能识别为双击）。位移用屏幕像素（this._startPos 是 clientX/Y）。
+      const ddx = this._startPos.x - this._lastTapPx.x, ddy = this._startPos.y - this._lastTapPx.y;
       const isDouble =
         now - this._lastTapTime < DOUBLE_TAP_WINDOW &&
-        pos.col === this._lastTapPos.col &&
-        pos.row === this._lastTapPos.row;
+        (ddx * ddx + ddy * ddy) <= DOUBLE_TAP_DIST * DOUBLE_TAP_DIST;
 
       this._state = STATE.IDLE;
       if (isDouble) {
         // 第二下：只触发双击（首下已即时触发过 tap）。
         this._lastTapTime = 0;
-        this._lastTapPos = { col: -1, row: -1 };
+        this._lastTapPx = { x: -1e4, y: -1e4 };
         this.cb.onDoubleTap?.(pos.col, pos.row);
       } else {
         // 即时响应：抬手立刻触发 tap，不再等双击窗口（消除点击延迟感）。
         this._lastTapTime = now;
-        this._lastTapPos = { col: pos.col, row: pos.row };
+        this._lastTapPx = { x: this._startPos.x, y: this._startPos.y };
         this.cb.onTap?.(pos.col, pos.row);
       }
     }

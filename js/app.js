@@ -95,7 +95,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── Seed characters in a loose central block ──────────────
   let glyphSeq = 0;
-  const nextGlyph = () => CHAR_POOL[(glyphSeq++) % CHAR_POOL.length];
+  // 当前里字内容来源：新增（螺旋飞入）的里字从这里取字，使其与当前呈现一致，而不是固定测试池。
+  // 由各呈现入口设置：原态文本=那句话的字、巨字=巨字本身、颜文字/曲线=诗词池（耐看且语义中性）。
+  let glyphSource = CHAR_POOL.slice();
+  const setGlyphSource = (chars) => {
+    const arr = (Array.isArray(chars) ? chars : [...String(chars)]).filter(ch => ch && ch.trim().length > 0);
+    glyphSource = arr.length ? arr : CHAR_POOL.slice();
+    glyphSeq = 0;
+  };
+  const nextGlyph = () => glyphSource[(glyphSeq++) % glyphSource.length];
   for (let i = 0; i < INITIAL_CHARS; i++) {
     const col = 2 + (i % 18);
     const row = 2 + Math.floor(i / 18);
@@ -749,12 +757,15 @@ document.addEventListener('DOMContentLoaded', () => {
   // 调试入口：即时呈现任意巨字(串)/指定颜文字/指定曲线（接入云端 AI 后即用这些）。
   function applyMegachar(text) {
     if (!text) return;
+    setGlyphSource(text);   // 巨字：里字内容就是这个字（串）本身
     formSampled(shapes.sampleMegachar(text, gridCols, gridRows, MAX_CHARS), '巨字 ' + text);
   }
   function applyEmojiKey(key) {
+    setGlyphSource(CHAR_POOL);   // 颜文字/曲线：里字用耐看的诗词字池（语义中性、不重复呆板）
     formSampled(shapes.sampleEmoji(key, gridCols, gridRows, 150), key);
   }
   function applyCurve(type) {
+    setGlyphSource(CHAR_POOL);
     formSampled(shapes.sampleCurveOrdered(type, gridCols, gridRows, 110), type);
   }
 
@@ -766,9 +777,8 @@ document.addEventListener('DOMContentLoaded', () => {
     lastSchedule = sch;
     try {
       const { message, emoji } = await ai.schedule(sch);
-      if (EMOJI_TEMPLATES[emoji]) applyEmojiKey(emoji);   // 先动态颜文字
-      else applyEmojiKey('^_^');
-      setTimeout(() => { if (message) formOriginText(message); }, 2600); // 再回归原态那句话
+      applyEmojiKey(EMOJI_TEMPLATES[emoji] ? emoji : '^_^');   // 先动态颜文字（待成型+停留）
+      setTimeout(() => { if (message) formOriginText(message); }, DWELL_EMOJI); // 再回归原态那句话
     } catch (e) { console.warn('presentSchedule:', e); }
   }
   // 暴露给宿主 App：window.setSchedule / postMessage / URL ?schedule=
@@ -787,15 +797,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── 对话态：三阶段（收束 L22；PHASE1 简洁回复→原态 / PHASE2 巨字 / PHASE3 回复流循环）──
   let convoActive = false, convoHistory = [], convoTimers = [], convoWaitId = null;
+  let lastUserMsg = null, lastConvoData = null, megaRotTimer = null;
   function clearConvoTimers() { convoTimers.forEach(clearTimeout); convoTimers = []; }
   function convoLater(fn, ms) { const id = setTimeout(fn, ms); convoTimers.push(id); return id; }
+  // 对话态中用户交互 → 暂停"自动推进"的定时器（但不退出对话态，双击可恢复/打断重答）。
+  function pauseConvoAuto() {
+    if (!convoActive) return;
+    clearConvoTimers();
+    if (megaRotTimer) { clearInterval(megaRotTimer); megaRotTimer = null; }
+  }
+  // 双击打断：从被打断处对最近一条用户消息"重新展开思考"（这里=重新请求 AI 再走三阶段）。
+  function resumeConvo() { if (lastUserMsg) sendConversation(lastUserMsg, true); }
 
-  async function sendConversation(text) {
+  async function sendConversation(text, isResume) {
     if (!text) return;
     convoActive = true;
+    lastUserMsg = text;
     clearConvoTimers();
     if (convoWaitId) clearInterval(convoWaitId);
-    convoHistory.push({ role: 'user', content: text });
+    if (megaRotTimer) { clearInterval(megaRotTimer); megaRotTimer = null; }
+    if (!isResume) convoHistory.push({ role: 'user', content: text });
     // 等待期：随机颜文字快速变化（收束 L22 AI 回复有延时，颜文字更活跃）。
     const keys = Object.keys(EMOJI_TEMPLATES);
     convoWaitId = setInterval(() => applyEmojiKey(keys[(Math.random() * keys.length) | 0]), 700);
@@ -807,26 +828,77 @@ document.addEventListener('DOMContentLoaded', () => {
     runConvoPhases(data);
   }
 
-  // PHASE1 原态简洁回复 → PHASE2 巨字 → PHASE3 回复流(text 原态 ↔ emoji 颜文字 循环)。
+  // 呈现停留时长：原态文本/颜文字/巨字各自"成型后再多停留一会儿"才切换（避免没成型就消失）。
+  // 原态过渡本身约 ORIGIN_MS(2.2s)；颜文字/巨字满填流动需约 1.6s 成型 → 留足 settle + 阅读时间。
+  const DWELL_ORIGIN = ORIGIN_MS + 2200;   // 原态：过渡(2.2s)+阅读(2.2s)
+  const DWELL_EMOJI = 3400;                 // 颜文字：成型(~1.6s)+停留
+  const DWELL_MEGA = 3800;                  // 巨字：成型 + 停留（含轮播时还会更久，见 presentMegachar）
+
+  // PHASE1 原态简洁回复 → PHASE2 巨字 → PHASE3 回复流(text 原态 ↔ emoji/巨字 循环)。
   function runConvoPhases(data) {
+    lastConvoData = data;
     clearConvoTimers();
     if (data.quickReply) formOriginText(data.quickReply);          // PHASE1
-    const mc = data.megachar, dur = (mc && mc.duration) || 3000;
     convoLater(() => {                                             // PHASE2 巨字
-      if (mc && mc.chars && mc.chars.length) applyMegachar(mc.chars.join(''));
-      convoLater(() => runConvoStream(data.stream || [], 0), dur);  // → PHASE3
-    }, 2600);
+      const mc = data.megachar;
+      const held = presentMegachar(mc && mc.chars, mc) || DWELL_MEGA;
+      convoLater(() => runConvoStream(data.stream || [], 0), held); // 成型+停留后 → PHASE3
+    }, DWELL_ORIGIN);
   }
+
+  // PHASE3 回复流：每段先原态那句话，再以"颜文字 或 巨字词语"表达，循环。巨字概率更高、且能呈现
+  // 词语/成语（自适应页面：字少直接整体呈现、字多则轮播）。每段都等当前形态成型后再进下一步。
+  const MEGA_WORDS = ['加油', '休息', '安心', '从容', '微笑', '坚持', '温柔', '勇敢', '热爱', '成长',
+    '心想事成', '苦尽甘来', '柳暗花明', '守得云开', '一切都好', '慢慢来'];
   function runConvoStream(stream, i) {
     if (!convoActive || stream.length === 0) return;
     const seg = stream[i % stream.length];
-    formOriginText(seg.text || '');                                // 段落原态
+    formOriginText(seg.text || '');                                // 段落原态那句话
     convoLater(() => {
-      if (seg.emoji && EMOJI_TEMPLATES[seg.emoji]) applyEmojiKey(seg.emoji); // 颜文字
-      convoLater(() => runConvoStream(stream, i + 1), 2400);       // 循环下一段
-    }, 2600);
+      if (!convoActive) return;
+      // 巨字概率 0.55：呈现 AI 给的 megachar 或一个应景词语/成语；否则颜文字表达心情。
+      let held;
+      if (Math.random() < 0.55) {
+        const word = (seg.megachar && seg.megachar.join) ? seg.megachar.join('')
+          : (seg.word || MEGA_WORDS[(Math.random() * MEGA_WORDS.length) | 0]);
+        held = presentMegachar([...word]) || DWELL_MEGA;
+      } else {
+        if (seg.emoji && EMOJI_TEMPLATES[seg.emoji]) applyEmojiKey(seg.emoji);
+        else applyEmojiKey('^_^');
+        held = DWELL_EMOJI;
+      }
+      convoLater(() => runConvoStream(stream, i + 1), held);       // 成型+停留后 → 下一段
+    }, DWELL_ORIGIN);
   }
-  function exitConversation() { convoActive = false; clearConvoTimers(); if (convoWaitId) { clearInterval(convoWaitId); convoWaitId = null; } }
+
+  // 巨字呈现（自适应页面）：词语字数少→整体一次呈现；字数多→分批轮播。返回总停留时长(ms)，
+  // 供上层在"全部呈现完且成型后"再切换。chars 为字数组。
+  function presentMegachar(chars, mc) {
+    if (megaRotTimer) { clearInterval(megaRotTimer); megaRotTimer = null; }
+    const arr = (Array.isArray(chars) ? chars : [...String(chars || '')]).filter(c => c && c.trim());
+    if (arr.length === 0) return 0;
+    // 页面一次能清晰容纳的巨字数：竖屏窄，单字最清晰；2 字尚可；≥3 字轮播。可被 mc 覆盖。
+    const cap = gridCols >= 30 ? 2 : 1;
+    const perGroup = (mc && mc.direction === 'horizontal') ? Math.min(arr.length, 2) : cap;
+    const groups = [];
+    for (let k = 0; k < arr.length; k += perGroup) groups.push(arr.slice(k, k + perGroup).join(''));
+    const interval = (mc && mc.rotateInterval) || DWELL_MEGA;     // 每组停留（含成型）
+    applyMegachar(groups[0]);
+    if (groups.length === 1) return DWELL_MEGA;
+    let g = 1;
+    megaRotTimer = setInterval(() => {
+      if (!convoActive) { clearInterval(megaRotTimer); megaRotTimer = null; return; }
+      applyMegachar(groups[g % groups.length]);
+      g++;
+      if (g >= groups.length) { clearInterval(megaRotTimer); megaRotTimer = null; }
+    }, interval);
+    return interval * groups.length + 600;                        // 轮播总时长
+  }
+  function exitConversation() {
+    convoActive = false; clearConvoTimers();
+    if (convoWaitId) { clearInterval(convoWaitId); convoWaitId = null; }
+    if (megaRotTimer) { clearInterval(megaRotTimer); megaRotTimer = null; }
+  }
 
   function releaseShape() {
     shapeActive = false;
@@ -1024,6 +1096,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const content = [...String(text)].filter(ch => ch.trim().length > 0);
     if (content.length === 0) return;
     lastOriginText = text;
+    setGlyphSource(content);   // 原态：里字内容 = 这句话的字
     inOrigin = false; originAnim = null; originHold = null;
     enterOrigin();
   }
@@ -1067,6 +1140,71 @@ document.addEventListener('DOMContentLoaded', () => {
   wireScheduleIntake();
   // 初次进入先呈现原态文本行（收束 L5；内容/长度自适应，后续由 AI 回答驱动）。
   setTimeout(() => { if (!lastSchedule) formOriginText('今天已完成三件事还有两项待办慢慢来继续加油'); }, 800);
+
+  // ── 两个核心模态入口按钮（收束 L2；左上=游戏态、左下=对话态）───────────────
+  // 让你按真实交互逻辑模拟检阅：左上小挂件按钮(游戏态占位)，左下展开输入框进入对话态发送。
+  buildModeButtons();
+  function buildModeButtons() {
+    const overlay = document.getElementById('ui-overlay');
+    if (!overlay) return;
+    const stop = e => e.stopPropagation();
+
+    // 左上：游戏态入口（本期游戏态未实现 → 点了给提示，保留位置与交互）。
+    const gameBtn = document.createElement('button');
+    gameBtn.textContent = '游戏';
+    gameBtn.title = '进入游戏态（本期未实现）';
+    gameBtn.style.cssText = 'position:absolute;left:8px;top:8px;width:38px;height:38px;'
+      + 'border-radius:10px;background:rgba(34,48,77,0.85);color:#cfe0ff;border:1px solid #3c4f76;'
+      + 'font-size:13px;cursor:pointer;';
+    gameBtn.addEventListener('pointerdown', stop);
+    gameBtn.addEventListener('click', e => { stop(e); toast('游戏态后续开放'); });
+
+    // 左下：对话态入口（点击展开输入框 → 发送进入对话态三阶段；收起退出）。
+    const convoWrap = document.createElement('div');
+    convoWrap.style.cssText = 'position:absolute;left:8px;bottom:8px;display:flex;gap:6px;align-items:center;';
+    const convoBtn = document.createElement('button');
+    convoBtn.textContent = '💬';
+    convoBtn.style.cssText = 'width:38px;height:38px;border-radius:10px;'
+      + 'background:rgba(34,48,77,0.85);color:#fff;border:1px solid #3c4f76;font-size:16px;cursor:pointer;';
+    const convoInput = document.createElement('input');
+    convoInput.type = 'text'; convoInput.placeholder = '对字灵说…'; convoInput.maxLength = 80;
+    convoInput.style.cssText = 'display:none;width:160px;padding:7px;border-radius:8px;'
+      + 'border:1px solid #3c4f76;background:#0d1320;color:#fff;font-size:14px;';
+    const sendBtn = document.createElement('button');
+    sendBtn.textContent = '发送'; sendBtn.style.display = 'none';
+    sendBtn.style.cssText = 'display:none;padding:7px 10px;border-radius:8px;'
+      + 'background:#2e7d5b;color:#fff;border:none;font-size:13px;cursor:pointer;';
+    let convoOpen = false;
+    const openConvo = () => { convoOpen = true; convoInput.style.display = 'block'; sendBtn.style.display = 'inline-block'; convoInput.focus(); };
+    const closeConvo = () => { convoOpen = false; convoInput.style.display = 'none'; sendBtn.style.display = 'none'; exitConversation(); enterOrigin(); };
+    const doSend = () => { const t = convoInput.value.trim(); if (t) { sendConversation(t); convoInput.value = ''; } };
+    convoBtn.addEventListener('pointerdown', stop);
+    convoBtn.addEventListener('click', e => { stop(e); convoOpen ? closeConvo() : openConvo(); });
+    convoInput.addEventListener('pointerdown', stop);
+    convoInput.addEventListener('keydown', e => { e.stopPropagation(); if (e.key === 'Enter') doSend(); });
+    sendBtn.addEventListener('pointerdown', stop);
+    sendBtn.addEventListener('click', e => { stop(e); doSend(); });
+    convoWrap.append(convoBtn, convoInput, sendBtn);
+
+    overlay.append(gameBtn, convoWrap);
+  }
+
+  // 轻量提示气泡（占位/反馈用）。
+  let toastEl = null, toastTimer = null;
+  function toast(msg) {
+    const overlay = document.getElementById('ui-overlay');
+    if (!overlay) return;
+    if (!toastEl) {
+      toastEl = document.createElement('div');
+      toastEl.style.cssText = 'position:absolute;left:50%;top:14%;transform:translateX(-50%);'
+        + 'padding:7px 12px;border-radius:8px;background:rgba(8,10,16,0.85);color:#eaeaea;'
+        + 'font-size:13px;pointer-events:none;transition:opacity .3s;opacity:0;';
+      overlay.append(toastEl);
+    }
+    toastEl.textContent = msg; toastEl.style.opacity = '1';
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { toastEl.style.opacity = '0'; }, 1600);
+  }
 
   // ── 调试面板（网页快捷查验：任意巨字 / 全部颜文字 / 曲线）─────────────────
   // 接入云端 AI 后即用 applyMegachar/applyEmojiKey 这些入口即时呈现任意字。
@@ -1217,6 +1355,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const gestures = new GestureRecognizer(renderer.canvas, CELL_SIZE, {
     onTap(col, row) {
       if (originAnim) return;                                       // 过渡中不打断
+      pauseConvoAuto();   // 对话态中：用户点击 → 暂停自动推进，反馈优先（收束 对话态同互动态）
       if (inOrigin || originHold) { triggerMicro(); enterShape(false); return; } // 原态→动态
       if (!shapeActive) return;
       clearTimeout(scatterTimer);
@@ -1239,12 +1378,15 @@ document.addEventListener('DOMContentLoaded', () => {
       if (originAnim) return;
       clearTimeout(scatterTimer);   // 取消前一下 onTap 可能挂起的散开/归位，避免与切形状打架
       triggerMicro();
+      // 对话态中双击 = 打断回复流、从被打断处重新展开（收束 L22）。
+      if (convoActive && lastUserMsg) { resumeConvo(); return; }
       if (inOrigin || originHold) { enterShape(false); return; } // 原态→动态（回到当前形状）
       applyShape(shapeIndex + 1);                   // 动态→切下一个形状
     },
 
     onLongPress() {
       // 长按：动态→回归原态文本行。阈值 650ms + 任意 >8px 移动即转为拖动 → 拖着玩不会误触。
+      pauseConvoAuto();   // 对话态长按 → 回归原态（同互动态）
       if (inOrigin || originHold || originAnim) return;
       enterOrigin();
     },
@@ -1252,6 +1394,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // 拖动（收束 L30）：里字聚成方形，按同心方环逐层旋转、越拖越快；中心=手指、
     // 整块跟手平移；松手在落点还原之前的形状。由显示层驱动（见渲染循环）。
     onDragStart(col, row, px, py) {
+      pauseConvoAuto();   // 对话态拖动 → 暂停自动推进，跟手环绕
       if (originAnim) { originAnim = null; } // 拖动打断过渡，直接接管
       if (inOrigin || originHold) { inOrigin = false; originHold = null; } // 原态→拖动：直接跟手环绕
       dragging = true;
