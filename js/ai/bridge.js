@@ -42,6 +42,14 @@ export function aiSource() {
   return 'mock';
 }
 
+/* ── 人设 / 记忆（设置页可调；后端可在 system prompt 用 persona、用 memory 决定是否带历史） ── */
+const LS_PERSONA = 'ziling.persona', LS_MEMORY = 'ziling.memory';
+export function setPersona(p) { try { p ? localStorage.setItem(LS_PERSONA, p) : localStorage.removeItem(LS_PERSONA); } catch { /* */ } }
+export function getPersona() { try { return localStorage.getItem(LS_PERSONA) || ''; } catch { return ''; } }
+/** AI 记忆开关：关 → chat 不带历史（每次都是新对话）。默认开。 */
+export function setMemory(on) { try { localStorage.setItem(LS_MEMORY, on ? '1' : '0'); } catch { /* */ } }
+export function memoryOn() { try { return localStorage.getItem(LS_MEMORY) !== '0'; } catch { return true; } }
+
 /* ── 后端网关请求 ─────────────────────────────────────────── */
 
 async function backend(path, body, method = 'POST') {
@@ -87,22 +95,25 @@ export async function ping() {
   return { status: 'ok', source: aiSource() };
 }
 
+const personaLine = () => { const p = getPersona(); return p ? `\n人设/风格要求：${p}。` : ''; };
+
 /** 互动态：日程反馈 → { message, emoji } */
 export async function schedule(sch) {
   try {
-    if (aiSource() === 'backend') return await backend('/api/schedule', sch);
-    if (aiSource() === 'direct') return await direct(SYSTEM_PROMPT_SCHEDULE, JSON.stringify(sch));
+    if (aiSource() === 'backend') return await backend('/api/schedule', { ...sch, persona: getPersona() });
+    if (aiSource() === 'direct') return await direct(SYSTEM_PROMPT_SCHEDULE + personaLine(), JSON.stringify(sch));
   } catch (e) { console.warn('[ai] schedule fallback to mock:', e.message); }
   return mockSchedule(sch);
 }
 
-/** 对话态：用户消息 → { quickReply, megachar, stream } */
+/** 对话态：用户消息 → { quickReply, megachar, stream }。记忆关闭时不带 history。 */
 export async function chat(message, history = []) {
+  const hist = memoryOn() ? history : [];
   try {
-    if (aiSource() === 'backend') return await backend('/api/chat', { message, history });
-    if (aiSource() === 'direct') return await direct(SYSTEM_PROMPT_CHAT, message);
+    if (aiSource() === 'backend') return await backend('/api/chat', { message, history: hist, persona: getPersona() });
+    if (aiSource() === 'direct') return await direct(SYSTEM_PROMPT_CHAT + personaLine(), message);
   } catch (e) { console.warn('[ai] chat fallback to mock:', e.message); }
-  return mockChat(message, history);
+  return mockChat(message, hist);
 }
 
 /** 游戏态：组词判定 → { valid, word? } */
