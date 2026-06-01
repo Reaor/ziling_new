@@ -66,19 +66,30 @@ async function backend(path, body, method = 'POST') {
  * 注意：浏览器直连会暴露 key 给该请求（仅你本机发起、key 来自你本机 localStorage）。
  * 这是"本机调试"专用通道，绝不用于上线；上线一律走后端网关。 */
 
-const SYSTEM_PROMPT_CHAT = `你叫"字灵"，一个温柔的汉字精灵，陪伴用户。只输出 JSON，不要解释或 Markdown。
-格式：{"quickReply":"≤20字的简洁回应","megachar":{"chars":["单个汉字"],"direction":"vertical","rotateInterval":0,"duration":3200},"stream":[{"text":"一句话","emoji":"颜文字"},{"text":"...","emoji":"..."},{"text":"...","emoji":"..."}]}
-颜文字只能从这些里选：^_^ -_- T_T Q_Q U_U >_< ≥﹏≤ ¬_¬ =_= ⊙_⊙ ^o^ ^.^ ≥▽≤ (^_^)/。megachar.chars 给 1 个最能概括心境的汉字。绝不输出负面攻击性内容。`;
+const SYSTEM_PROMPT_CHAT = `你叫"字灵"，一个温柔、聪慧、懂用户的汉字精灵，住在用户的日程 App 里陪伴并帮助他。
+【回答质量要求——这是重点】
+1. 真正读懂用户这句话的意图与情绪，针对性地回应，绝不套话、空洞鸡汤或答非所问。
+2. 若给了【用户当前日程】，结合其真实安排/完成情况给具体、可操作、个性化的建议（点名某件事、给出明确的小步骤），像一个记得他日程的朋友。
+3. 提到问题就给真办法；情绪低落就先共情再轻推一步；开心就一起庆祝并帮他记住这份劲头。语气自然、有温度、不端着。
+4. 善用汉字之美：可借一个字的字形/字义点题（如"休=人倚木"），但点到为止，别掉书袋。
+【输出】只输出 JSON，不要解释或 Markdown：
+{"quickReply":"≤20字、直接回应这句话的核心（最重要的一句）","megachar":{"chars":["1~2个最能概括此刻主旨/心境的字"],"direction":"vertical","rotateInterval":0,"duration":3200},"stream":[{"text":"一句话","emoji":"颜文字"},{"text":"承接上一句、递进","emoji":"颜文字"},{"text":"落到一个具体行动或暖心收尾","emoji":"颜文字"}]}
+stream 的三句要连贯成一段完整的小思路（共情→展开→落地），不是三句不相干的话。每句≤22字。
+颜文字只能从这些里选：^_^ -_- T_T Q_Q U_U >_< ≥﹏≤ ¬_¬ =_= ⊙_⊙ ^o^ ^.^ ≥▽≤ (^_^)/，且要贴合该句情绪。绝不输出负面攻击或敷衍内容。`;
 
 const SYSTEM_PROMPT_SCHEDULE = `你叫"字灵"。根据用户今日日程完成情况，输出 JSON：{"message":"≤30字的鼓励/陪伴话","emoji":"颜文字"}。颜文字从 ^_^ ^o^ ≥▽≤ (^_^)/ ^.^ -_- =_= >_< T_T 里选，完成多用积极的、拖延多用安慰的。`;
 
-async function direct(systemPrompt, userContent, temperature = 1.0) {
+async function direct(systemPrompt, userContent, temperature = 1.0, history = []) {
+  // 带上最近几轮对话（history）→ AI 有上下文记忆、回答更连贯更懂用户。只取 role/content 干净字段。
+  const hist = (Array.isArray(history) ? history : [])
+    .filter(m => m && (m.role === 'user' || m.role === 'assistant') && m.content)
+    .map(m => ({ role: m.role, content: String(m.content) }));
   const res = await fetch(DEEPSEEK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userKey()}` },
     body: JSON.stringify({
       model: DEEPSEEK_MODEL,
-      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userContent }],
+      messages: [{ role: 'system', content: systemPrompt }, ...hist, { role: 'user', content: userContent }],
       response_format: { type: 'json_object' },
       temperature,
     }),
@@ -117,7 +128,7 @@ export async function chat(message, history = [], ctx = {}) {
     if (aiSource() === 'backend') return await backend('/api/chat', { message, history: hist, persona: getPersona(), schedule });
     if (aiSource() === 'direct') {
       const sched = schedule ? `\n【用户当前日程】${JSON.stringify(schedule)}。回答涉及日程的问题时请据此给出基于其实际安排/习惯的具体建议。` : '';
-      return await direct(SYSTEM_PROMPT_CHAT + personaLine() + sched, message);
+      return await direct(SYSTEM_PROMPT_CHAT + personaLine() + sched, message, 0.85, hist);
     }
   } catch (e) { console.warn('[ai] chat fallback to mock:', e.message); }
   return mockChat(message, hist, schedule);
