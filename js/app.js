@@ -145,20 +145,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // 物理规律动态：
     { name: '摆群波', make: () => ({ mask: buildWideBandCells(),  anim: 'pendwave' }) },
     { name: '弹跳',   make: () => ({ mask: buildWideBandCells(),  anim: 'bounce' }) },
-    // 飞龙：里字组成龙身剪影、飞来飞去（显示层定位）。
-    { name: '飞龙',   make: () => ({ mask: buildDragonCells(), anim: 'dragon', dragon: true }) },
-    // 场景动态：二次元少女剪影 / 贪吃蛇 / 火柴人对打。
-    { name: '少女',   make: () => ({ mask: buildSceneMask(SILHOUETTE_GIRL), anim: 'girl', scene: true }) },
-    { name: '贪吃蛇', make: () => ({ mask: buildSnakeCells(), anim: 'snake', scene: true }) },
-    { name: '火柴人', make: () => ({ mask: buildSceneMask(STICKMAN_POSE), anim: 'fight', scene: true }) },
+    // 贪吃蛇：里字像正常形态一样严格沿格子纵横走（华容道滑格），追逐画面上的圆球。
+    { name: '贪吃蛇', snake: true },
   ];
   let shapeIndex = 0;
   let shapeActive = false;
   let inOrigin = false;         // 原态（文本行）态：长按进入；点/双击/拖动回到动态形状
   let currentAnim = null;       // 动态曲线的"形状自身动态"函数 (char,t)=>void（显示层）；无则 null
-  let currentDragon = false;    // 飞龙模式：里字按身体参数 u 排在会飞的龙身上（需逐帧前 tag）
-  let currentScene = false;     // 场景模式（少女/贪吃蛇/火柴人）：里字按 sceneU 排到场景图形上
   let animDirty = false;        // 用过 anim 亮度乘子 → 离开时需清一次
+  let snakeTimer = null;        // 贪吃蛇：每步重排掩码的定时器（里字沿格子滑动跟随）
   let clockTimer = null;        // 北京时间：每秒重采样的定时器
   let lastOriginText = null;    // 最近一次原态文本（长按回归原态时按此内容/顺序还原）
   const defaultOriginText = '今天已完成三件事还有两项待办慢慢来继续加油';
@@ -285,6 +280,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (diff > 0) spawnSpiralIn(diff, mask);
     else if (diff < 0) despawnSpiralOut(-diff, mask);
   }
+  // 精确把里字数调到 target（不抬到 MIN_CHARS）：贪吃蛇等"格数即字数"的形态用，杜绝多余里字重叠。
+  function adaptCharCountExact(target, mask) {
+    target = Math.max(1, Math.min(MAX_CHARS, target));
+    const diff = target - aliveChars().length;
+    if (diff > 0) spawnSpiralIn(diff, mask);
+    else if (diff < 0) despawnSpiralOut(-diff, mask);
+  }
 
   // 每帧推进螺旋 agent：设 displayX/Y + alpha；到点则并入流动 / 回收。
   function updateSpirals(dtMs) {
@@ -354,6 +356,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // 把一份采样结果（mask 或 paths）成形。供双击循环、调试面板任意字/颜文字/曲线共用。
   function formSampled(sampled, label = 'shape') {
     stopClock();                 // 切到任何普通形状都停掉时钟定时器
+    stopSnake();                 // 停掉贪吃蛇步进
     flushTransit();              // 先收尾上一形状未完成的螺旋过渡（防连切把字卡没）
     originAnim = null; originHold = null;
     // 复位显示属性：清除原态放大 + 把在册里字 alpha 拉回 1（防极端竞态留下 alpha=0 的隐形字）。
@@ -361,8 +364,6 @@ document.addEventListener('DOMContentLoaded', () => {
     shapeActive = true;
     inOrigin = false;
     currentAnim = sampled.anim ? ANIMS[sampled.anim] : null; // 动态曲线开启形状自身动态
-    currentDragon = !!sampled.dragon;
-    currentScene = !!sampled.scene;
     if (currentAnim) animDirty = true;
     let target = 0;
     if (sampled.paths && sampled.paths.length > 0) {
@@ -392,10 +393,6 @@ document.addEventListener('DOMContentLoaded', () => {
     target = Math.min(MAX_CHARS, target);
     adaptCharCount(target, currentCells);
     formCurrent();
-    // 飞龙/场景动态：里字数定后按 id 标注身位参数，位置全交由 anim 在显示层定位（strict 仅用于
-    // 在引擎里登记/常态游动，anim 每帧覆盖显示位 → 图形始终成形可见）。
-    if (currentDragon) tagDragon(aliveChars());
-    if (currentScene) tagScene(aliveChars());
     console.log(`Shape → ${label} (${currentConstraint}, ${currentCells.length} cells, ${aliveIds().length}里字)`);
   }
 
@@ -403,6 +400,7 @@ document.addEventListener('DOMContentLoaded', () => {
     shapeIndex = ((index % SHAPES.length) + SHAPES.length) % SHAPES.length;
     const def = SHAPES[shapeIndex];
     if (def.clock) { applyClock(); return; }
+    if (def.snake) { applySnake(); return; }
     formSampled(def.make(def.cells), def.name);
   }
 
@@ -436,7 +434,91 @@ document.addEventListener('DOMContentLoaded', () => {
     clockTimer = setInterval(tick, 1000);
   }
 
-  // ── 动态曲线：底形（mask）+ 形状自身动态（ANIMS 显示层位移）──────────────────
+  // ── 贪吃蛇 ──────────────────────────────────────────────────────────────────
+  // 一条由里字组成的蛇在格子上严格纵横爬行（每步走一格、不走斜），去吃画面上的"圆球"（也由
+  // 里字摆成的小圆环），吃到就在别处生成新球。蛇身 = 一串有序相邻格；球 = 一圈格。两者格子互不
+  // 重叠，合成掩码交给满填流动（setFlowFill）→ 里字像正常形态那样沿格滑动跟随，无字重叠。
+  const snake = { body: [], dir: [1, 0], ball: null, len: 30 };
+  function stopSnake() { if (snakeTimer) { clearInterval(snakeTimer); snakeTimer = null; } }
+  // 小圆环（球）格子：以 (cx,cy) 为心、半径 r 的一圈格。
+  function ballCells(cx, cy, r = 2) {
+    const out = [], seen = new Set();
+    for (let a = 0; a < Math.PI * 2; a += 0.35) {
+      const x = Math.round(cx + Math.cos(a) * r), y = Math.round(cy + Math.sin(a) * r);
+      if (x < 0 || y < 0 || x >= gridCols || y >= gridRows) continue;
+      const k = y * gridCols + x; if (seen.has(k)) continue; seen.add(k); out.push({ x, y });
+    }
+    return out;
+  }
+  function randBall() {
+    const m = 3;
+    for (let tries = 0; tries < 60; tries++) {
+      const cx = m + 2 + Math.floor(Math.random() * (gridCols - 2 * (m + 2)));
+      const cy = m + 2 + Math.floor(Math.random() * (gridRows - 2 * (m + 2)));
+      const occ = new Set(snake.body.map(c => c.y * gridCols + c.x));
+      const cells = ballCells(cx, cy);
+      if (cells.length >= 5 && cells.every(c => !occ.has(c.y * gridCols + c.x))) return { cx, cy, cells };
+    }
+    return { cx: Math.floor(gridCols / 2), cy: 4, cells: ballCells(Math.floor(gridCols / 2), 4) };
+  }
+  function snakeStep() {
+    // 蛇头朝球做"纵横"前进：优先缩小与球差距大的那个轴；不立刻掉头。
+    const head = snake.body[0];
+    const bx = snake.ball.cx, by = snake.ball.cy;
+    const opts = [];
+    if (Math.abs(bx - head.x) >= Math.abs(by - head.y)) {
+      if (bx !== head.x) opts.push([Math.sign(bx - head.x), 0]);
+      if (by !== head.y) opts.push([0, Math.sign(by - head.y)]);
+    } else {
+      if (by !== head.y) opts.push([0, Math.sign(by - head.y)]);
+      if (bx !== head.x) opts.push([Math.sign(bx - head.x), 0]);
+    }
+    opts.push(snake.dir, [1, 0], [-1, 0], [0, 1], [0, -1]);
+    const bodySet = new Set(snake.body.slice(0, -1).map(c => c.y * gridCols + c.x));
+    let nd = null, nx = head.x, ny = head.y;
+    for (const [dx, dy] of opts) {
+      if (dx === -snake.dir[0] && dy === -snake.dir[1]) continue;     // 不直接掉头
+      const x = head.x + dx, y = head.y + dy;
+      if (x < 1 || y < 1 || x >= gridCols - 1 || y >= gridRows - 1) continue;
+      if (bodySet.has(y * gridCols + x)) continue;                    // 不撞自己
+      nd = [dx, dy]; nx = x; ny = y; break;
+    }
+    if (!nd) { nd = snake.dir; nx = head.x + nd[0]; ny = head.y + nd[1]; } // 兜底
+    snake.dir = nd;
+    snake.body.unshift({ x: nx, y: ny });
+    // 吃到球（蛇头进入球范围）→ 长大 + 换球；否则缩尾保持长度。
+    const reached = Math.abs(nx - snake.ball.cx) <= 1 && Math.abs(ny - snake.ball.cy) <= 1;
+    if (reached) { snake.len = Math.min(55, snake.len + 4); snake.ball = randBall(); }
+    while (snake.body.length > snake.len) snake.body.pop();
+  }
+  function applySnake() {
+    stopClock(); stopSnake(); flushTransit();
+    shapeActive = true; inOrigin = false; currentAnim = null; animDirty = true;
+    originAnim = null; originHold = null;
+    for (const c of pool.getAll()) { c.dispScale = 1; if (!transitIds.has(c.id)) { c.alpha = 1; c.animA = 1; c.flowFade = 1; } }
+    // 初始化蛇身（横向一段）+ 球。
+    const sy = Math.floor(gridRows / 2), sx = Math.floor(gridCols / 2) + 8;
+    snake.body = []; snake.dir = [1, 0]; snake.len = 30;
+    for (let i = 0; i < snake.len; i++) snake.body.push({ x: Math.max(1, sx - i), y: sy });
+    snake.ball = randBall();
+    let inited = false;
+    const tick = () => {
+      snakeStep();
+      // 合成掩码 = 蛇身 + 球（去重，body 在前→蛇身优先占格）。
+      const seen = new Set(), cells = [];
+      for (const c of snake.body.concat(snake.ball.cells)) {
+        if (c.x < 0 || c.y < 0 || c.x >= gridCols || c.y >= gridRows) continue;
+        const k = c.y * gridCols + c.x; if (seen.has(k)) continue; seen.add(k); cells.push({ x: c.x, y: c.y });
+      }
+      currentConstraint = 'strict'; currentPaths = null; currentCells = cells;
+      // 里字数精确等于掩码格数 → 一格一字、无空缺无重叠（蛇身/球都铺满）。绕开 MIN_CHARS 下限。
+      adaptCharCountExact(cells.length, cells);
+      motion.setFlowFill(cells, aliveIds());
+    };
+    tick();
+    snakeTimer = setInterval(tick, 360);   // 每步 0.36s（里字在 tick 间沿格滑动跟随）
+  }
+
   // 里字在底形里匀速走格（里字动态），叠加 ANIMS 的周期位移（形状自身动态）→ 优美变化曲线。
   const CC = () => CELL_SIZE;
   // 正弦波：中间横带（里字满填），整带按 gridX 相位大幅正弦起伏（波峰波谷大、视觉冲击）。
@@ -594,13 +676,6 @@ document.addEventListener('DOMContentLoaded', () => {
     for (let dy = 0; dy < h; dy++) for (let x = m; x < gridCols - m; x++) cells.push({ x, y: y0 + dy });
     return cells;
   }
-  // 飞龙：只需提供里字数量（龙身长度），位置全由 dragon 动态在显示层决定。约 90 个里字成一条龙。
-  function buildDragonCells() {
-    const cells = [], n = 90, cx = Math.floor(gridCols / 2), cy = Math.floor(gridRows / 2);
-    for (let i = 0; i < n; i++) cells.push({ x: (cx + i) % gridCols, y: (cy + ((i / gridCols) | 0)) % gridRows });
-    return cells;
-  }
-
   // 形状自身动态：改 displayX/Y（位移）或 animA（亮度乘子）。t = 秒。所有位移类均经实测在各
   // 相位 0 重叠（刚体旋转/相似缩放，或位移梯度 <1 格/格 → 不会把相邻里字挤到一起）。
   const cen = () => ({ cx: (gridCols - 1) / 2 * CC(), cy: (gridRows - 1) / 2 * CC() });
@@ -653,176 +728,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const height = (1 - (1 - h) * (1 - h));        // 顶部慢、底部快（近似重力）
       c.displayY -= height * CC() * 5.0;             // 始终从基线向上弹起
     },
-    // 飞龙：把里字按身体参数 u(头→尾) 摆到一条"会飞的蛇形身躯"上。头沿莉萨如路径在画面里飞来
-    //   飞去，身体以时间延迟跟随（节节相随）+ 沿切线法向的蛇形摆动 → 一条游动的龙。head 略大、
-    //   躯干两侧加厚成"身躯"。完全由显示层定位（像心形曲线那样，龙身本身即运动）。
-    dragon: (c, t) => {
-      const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE;
-      const u = c.dragonU != null ? c.dragonU : 0;     // 0=头 1=尾
-      const head = dragonPath(t), tan = dragonPath(t + 0.001 * DRAGON_LAG);
-      const bt = t - u * DRAGON_LAG;                    // 身体节延迟跟随
-      const p = dragonPath(bt), p2 = dragonPath(bt + 0.02);
-      let tx = p2.x - p.x, ty = p2.y - p.y; const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;
-      const nx = -ty, ny = tx;                          // 法向
-      const wig = Math.sin(bt * 6 + u * 10) * CC() * 1.6 * (0.4 + 0.6 * u); // 蛇形摆动（尾摆大）
-      const thick = (c.dragonW || 0) * CC() * (1.1 - 0.7 * u);             // 身躯厚度（头粗尾细）
-      c.displayX = p.x + nx * (wig + thick) - CELL_SIZE / 2;
-      c.displayY = p.y + ny * (wig + thick) - CELL_SIZE / 2;
-      c.dispScale = 1.35 - 0.5 * u;                     // 头大尾小
-      c.alpha = 1; c.animA = 1; c.flowFade = 1;
-    },
-    // ── 场景动态：里字按 sceneSlot(0..1) 排到一组随时间变化的目标点上 ──────────────
-    // 二次元少女剪影：站姿 + 手臂/裙摆随时间小幅摆动、整体轻微呼吸 → 像在做轻动作。
-    girl: (c, t) => placeScene(c, t, girlPoint),
-    // 贪吃蛇：一条蛇身追逐画面上的圆球；吃到就换新球。蛇头朝球前进、身体节节跟随。
-    snake: (c, t) => placeScene(c, t, snakePoint),
-    // 火柴人对打：两个火柴人左右站立，手臂/腿做出拳/防御动作、身体前后趋近 → 打斗情境。
-    fight: (c, t) => placeScene(c, t, fightPoint),
   };
-  // 场景：把里字 c 放到 fn(u,t) 返回的目标像素点（u=该里字稳定身位 0..1）。dispScale 可由 fn 给。
-  function placeScene(c, t, fn) {
-    const u = c.sceneU != null ? c.sceneU : 0;
-    const p = fn(u, t);
-    c.displayX = p.x - CELL_SIZE / 2; c.displayY = p.y - CELL_SIZE / 2;
-    c.dispScale = p.s || 1; c.alpha = 1; c.animA = 1; c.flowFade = 1;
-  }
-  // 给一组里字按 id 稳定分配 sceneU(0..1)。
-  function tagScene(cs) {
-    const arr = cs.slice().sort((a, b) => a.id - b.id), n = arr.length;
-    arr.forEach((ch, i) => { ch.sceneU = n > 1 ? i / (n - 1) : 0; });
-  }
-  // 龙头飞行路径（莉萨如）：在画面安全区内来回飞，避免贴边。
-  const DRAGON_LAG = 2.6;   // 头尾时间差（秒）→ 身体长度感
-  function dragonPath(tt) {
-    const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE;
-    return {
-      x: W / 2 + Math.sin(tt * 0.55) * W * 0.34,
-      y: H / 2 + Math.sin(tt * 0.85 + 1.0) * H * 0.30,
-    };
-  }
-  // 给一组里字标注身体参数：按 id 稳定排序 → u=头→尾；同时给少量两侧厚度 dragonW(−1/0/+1)。
-  function tagDragon(cs) {
-    const arr = cs.slice().sort((a, b) => a.id - b.id);
-    const n = arr.length;
-    arr.forEach((c, i) => {
-      c.dragonU = n > 1 ? i / (n - 1) : 0;
-      c.dragonW = (i % 3) - 1;     // -1/0/1 → 身躯三股厚度
-    });
-  }
 
-  // ── 场景图形框架 ───────────────────────────────────────────────────────────
-  // 一个"场景"由若干带权重的线段(limb)组成；把 u∈[0,1] 按权重映射到某条线段的某个位置，
-  // 返回像素点。线段端点随 t 摆动 → 人物做动作。各场景给出 segsAt(t) → [{a:[x,y],b:[x,y],w}]。
-  const SCN = () => ({ W: gridCols * CELL_SIZE, H: gridRows * CELL_SIZE });
-  // 由 u 在一组线段上取点（按 w 占比分配 u）。
-  function pointOnSegs(u, segs, sBase = 1) {
-    let tot = 0; for (const s of segs) tot += s.w;
-    let acc = 0;
-    for (const s of segs) {
-      const frac = s.w / tot;
-      if (u <= acc + frac || s === segs[segs.length - 1]) {
-        const lu = frac > 0 ? Math.max(0, Math.min(1, (u - acc) / frac)) : 0;
-        return { x: s.a[0] + (s.b[0] - s.a[0]) * lu, y: s.a[1] + (s.b[1] - s.a[1]) * lu, s: s.s || sBase };
-      }
-      acc += frac;
-    }
-    const last = segs[segs.length - 1];
-    return { x: last.b[0], y: last.b[1], s: sBase };
-  }
-
-  // 二次元少女剪影：圆脸 + 两束头发 + 身体 + 喇叭裙 + 双臂 + 双腿；手臂/裙摆随 t 轻摆、整体呼吸。
-  // 把 u 的前 ~22% 分给"头部圆环"(画成圆脸)，其余给四肢/裙身。
-  function girlPoint(u, t) {
-    const { W, H } = SCN(), cx = W / 2, top = H * 0.15, sc = Math.min(W, H);
-    const br = Math.sin(t * 1.4) * sc * 0.012;                 // 呼吸
-    const headY = top + sc * 0.07, headR = sc * 0.065, neck = headY + headR + sc * 0.015;
-    const hip = neck + sc * 0.20 + br, footY = hip + sc * 0.30;
-    const armSw = Math.sin(t * 1.1) * sc * 0.06;               // 手臂摆
-    const skirtSw = Math.sin(t * 1.6 + 1) * sc * 0.03;
-    const HEAD = 0.24;                                         // 头部占 u 比例（画成圆脸）
-    if (u < HEAD) {
-      const a = (u / HEAD) * Math.PI * 2;                      // 圆脸
-      return { x: cx + Math.cos(a) * headR, y: headY + Math.sin(a) * headR, s: 1 };
-    }
-    const v = (u - HEAD) / (1 - HEAD);
-    const segs = [
-      { a: [cx - headR, headY], b: [cx - headR * 1.2, neck + sc * 0.06], w: 0.7 }, // 左发束
-      { a: [cx + headR, headY], b: [cx + headR * 1.2, neck + sc * 0.06], w: 0.7 }, // 右发束
-      { a: [cx, neck], b: [cx, hip], w: 1.5 },                                     // 身体
-      { a: [cx, neck + sc * 0.02], b: [cx - sc * 0.16, neck + sc * 0.16 + armSw], w: 1.0 }, // 左臂
-      { a: [cx, neck + sc * 0.02], b: [cx + sc * 0.16, neck + sc * 0.16 - armSw], w: 1.0 }, // 右臂
-      { a: [cx, hip], b: [cx - sc * 0.18 + skirtSw, footY], w: 1.4 },              // 喇叭裙左/左腿
-      { a: [cx, hip], b: [cx + sc * 0.18 - skirtSw, footY], w: 1.4 },              // 喇叭裙右/右腿
-      { a: [cx - sc * 0.18 + skirtSw, footY], b: [cx + sc * 0.18 - skirtSw, footY], w: 1.0 }, // 裙摆底
-    ];
-    return pointOnSegs(v, segs);
-  }
-
-  // 贪吃蛇：蛇头朝当前圆球前进，身体节延迟跟随；吃到球(距离够近)换新球。u: 0=头…接近1=尾；
-  // 末尾一小段 u 用来画"圆球"。蛇头位置用持久状态 snakeState 积分推进。
-  const snakeState = { x: 0, y: 0, hist: [], target: null, inited: false, lastT: 0 };
-  function snakePoint(u, t) {
-    const { W, H } = SCN(), pad = 28;
-    if (!snakeState.inited) {
-      snakeState.x = W / 2; snakeState.y = H / 2; snakeState.inited = true;
-      snakeState.target = [pad + Math.random() * (W - 2 * pad), pad + Math.random() * (H - 2 * pad)];
-      snakeState.hist = []; snakeState.lastT = t;
-    }
-    // 每帧（u==0 的里字触发一次）推进蛇头并记录轨迹。
-    if (u === 0 || snakeState.hist.length === 0) {
-      let dt = t - snakeState.lastT; if (dt < 0 || dt > 0.1) dt = 0.016; snakeState.lastT = t;
-      const tg = snakeState.target;
-      let dx = tg[0] - snakeState.x, dy = tg[1] - snakeState.y, d = Math.hypot(dx, dy) || 1;
-      const spd = Math.min(d, 150 * dt);                       // 像素/帧
-      snakeState.x += (dx / d) * spd; snakeState.y += (dy / d) * spd;
-      snakeState.hist.unshift([snakeState.x, snakeState.y]);
-      if (snakeState.hist.length > 400) snakeState.hist.length = 400;
-      if (d < 16) snakeState.target = [pad + Math.random() * (W - 2 * pad), pad + Math.random() * (H - 2 * pad)];
-    }
-    const BALL = 0.16;                                         // 末段画圆球
-    if (u > 1 - BALL) {
-      const a = ((u - (1 - BALL)) / BALL) * Math.PI * 2, r = CELL_SIZE * 1.3, tg = snakeState.target || [W / 2, H / 2];
-      return { x: tg[0] + Math.cos(a) * r, y: tg[1] + Math.sin(a) * r, s: 1 };
-    }
-    // 身体：沿历史轨迹按 u 取点（头在前）。
-    const bu = u / (1 - BALL);
-    const idx = Math.min(snakeState.hist.length - 1, Math.floor(bu * (snakeState.hist.length - 1)));
-    const pt = snakeState.hist[idx] || [snakeState.x, snakeState.y];
-    return { x: pt[0], y: pt[1], s: 1.25 - 0.4 * bu };          // 头大尾小
-  }
-
-  // 火柴人对打：左右两个火柴人(头+身+两臂两腿)，前后趋近 + 出拳/收拳。u 前半给左、后半给右。
-  function fightPoint(u, t) {
-    const { W, H } = SCN(), sc = Math.min(W, H);
-    const beat = Math.sin(t * 3.0);                            // 出拳节拍
-    const approach = (Math.sin(t * 0.7) * 0.5 + 0.5) * sc * 0.08;
-    const man = (baseX, dir, punch) => {
-      const cx = baseX + dir * approach, topY = H * 0.30, sh = topY + sc * 0.10;
-      const hip = sh + sc * 0.16, foot = hip + sc * 0.20;
-      const armY = sh + sc * 0.02, reach = (0.5 + 0.5 * punch) * sc * 0.18 * dir * -1;
-      return [
-        { a: [cx, topY - sc * 0.045], b: [cx, topY + sc * 0.045], w: 1.2, s: 1.15 }, // 头
-        { a: [cx, sh], b: [cx, hip], w: 1.3 },                                       // 身
-        { a: [cx, armY], b: [cx + reach, armY + sc * 0.02 - punch * sc * 0.03], w: 1.0 }, // 出拳臂
-        { a: [cx, armY], b: [cx - dir * sc * 0.10, armY + sc * 0.08], w: 0.8 },      // 另一臂(防御)
-        { a: [cx, hip], b: [cx - sc * 0.08, foot], w: 1.0 },                         // 左腿
-        { a: [cx, hip], b: [cx + sc * 0.08, foot], w: 1.0 },                         // 右腿
-      ];
-    };
-    const left = man(W * 0.34, 1, Math.max(0, beat));
-    const right = man(W * 0.66, -1, Math.max(0, -beat));
-    if (u < 0.5) return pointOnSegs(u / 0.5, left);
-    return pointOnSegs((u - 0.5) / 0.5, right);
-  }
-
-  // 场景底形：只为提供"里字数量"。少女/火柴人给中等数量，贪吃蛇给一条长链。
-  const SILHOUETTE_GIRL = 120, STICKMAN_POSE = 120;
-  function buildSceneMask(n) {
-    const cells = [], cx = Math.floor(gridCols / 2), cy = Math.floor(gridRows / 2);
-    for (let i = 0; i < n; i++) cells.push({ x: (cx + i) % gridCols, y: (cy + ((i / gridCols) | 0)) % gridRows });
-    return cells;
-  }
-  function buildSnakeCells() { snakeState.inited = false; return buildSceneMask(110); }
   // 把里字的显示位（含内部游动）绕 (cx,cy) 旋转 ang —— 旋转作用在"已含华容道游动的位置"上，
   // 故内部里字的常态运动被完整保留，整体又在转/摆/扭。以格中心为基准旋转后再换回左上角。
   function rotateDisp(c, ctr, ang) {
@@ -854,9 +761,8 @@ document.addEventListener('DOMContentLoaded', () => {
     shapeActive = false;
     inOrigin = false;
     currentAnim = null;
-    currentDragon = false;
-    currentScene = false;
     stopClock();
+    stopSnake();
     currentPaths = null;
     currentCells = [];
     motion.releaseShape();
@@ -872,7 +778,7 @@ document.addEventListener('DOMContentLoaded', () => {
   function enterOrigin() {
     if (inOrigin || originAnim) return;
     if (aliveIds().length === 0) return;
-    stopClock(); currentAnim = null; currentDragon = false; currentScene = false; animDirty = true; flushTransit();
+    stopClock(); stopSnake(); currentAnim = null; animDirty = true; flushTransit();
     clearTimeout(scatterTimer);
     if (motion.isOrbiting()) motion.endOrbit();
     // 内容/长度自适应：去掉动态多出的里字、补回缺的，呈现"原本那段话"。
@@ -1150,13 +1056,10 @@ document.addEventListener('DOMContentLoaded', () => {
                    ['脉动花', 'bloom', buildRoseCells], ['银河', 'galaxy', buildSpiralCells],
                    ['摇摆竹帘', 'curtain', buildVBandsCells], ['扭动', 'twist', buildDiskCells],
                    ['钟摆', 'pendulum', buildColumnCells],
-                   ['摆群波', 'pendwave', buildWideBandCells], ['弹跳', 'bounce', buildWideBandCells],
-                   ['飞龙', 'dragon', buildDragonCells, { dragon: true }],
-                   ['少女', 'girl', () => buildSceneMask(SILHOUETTE_GIRL), { scene: true }],
-                   ['贪吃蛇', 'snake', buildSnakeCells, { scene: true }],
-                   ['火柴人', 'fight', () => buildSceneMask(STICKMAN_POSE), { scene: true }]];
-    for (const [label, anim, build, opt] of anims)
-      r6.append(mkBtn(label, () => formSampled({ mask: build(), anim, ...(opt || {}) }, label)));
+                   ['摆群波', 'pendwave', buildWideBandCells], ['弹跳', 'bounce', buildWideBandCells]];
+    for (const [label, anim, build] of anims)
+      r6.append(mkBtn(label, () => formSampled({ mask: build(), anim }, label)));
+    r6.append(mkBtn('贪吃蛇', () => applySnake()));
 
     // 原态文本（内容/长度自适应，模拟 AI 回答）
     const r5 = row(); r5.append(makeLabel('原态'));
@@ -1322,10 +1225,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (currentAnim) {
         // 进阶·形状自身动态：钉位里字 + 在显示层叠加位移/亮度(形状自身动态)。animA=亮度乘子。
         const t = now / 1000;
-        const cs = aliveChars();
-        if (currentDragon && cs.some(c => c.dragonU == null)) tagDragon(cs); // 新增里字补标身体参数
-        if (currentScene && cs.some(c => c.sceneU == null)) tagScene(cs);
-        for (const c of cs) { c.animA = 1; currentAnim(c, t); }
+        for (const c of aliveChars()) { c.animA = 1; currentAnim(c, t); }
       } else if (animDirty) {
         // 离开动态曲线后清掉残留的亮度乘子，避免里字停在变暗状态。
         for (const c of pool.getAll()) c.animA = 1;
