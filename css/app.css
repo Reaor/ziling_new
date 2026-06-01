@@ -1,21 +1,32 @@
-body {
+:root {
+  /* 主题色：默认跟随系统（见 prefers-color-scheme）；JS 也会按设置覆盖到这两个变量。 */
+  --zl-bg: #1a1a2e;
+  --zl-fg: #e0e0e0;
+}
+
+html, body {
   margin: 0;
-  background: #0d0d0d;
+  height: 100%;
+  background: var(--zl-bg);
+  overflow: hidden;
+}
+body {
   display: flex;
   justify-content: center;
   align-items: center;
   min-height: 100vh;
-  overflow: hidden;
+  min-height: 100dvh;   /* 移动端动态视口高度，避开地址栏占位 */
 }
 
 #app-container {
-  /* 自适应：随设备窗口缩放，并限制在一个比常见手机页略小的上限内
-     （为后续 app 自身 UI 留出空间）。宽高用 min(vw/vh, 上限) 兼顾小屏与大屏。 */
-  width: min(92vw, 300px);
-  height: min(88vh, 540px);
+  /* 移动端铺满视口（去黑框）；桌面给一个上限便于预览，但不再留深色边。 */
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  max-width: 480px;     /* 桌面预览上限（移动端 100vw 一般 < 480，等同铺满） */
   position: relative;
   overflow: hidden;
-  background: #1a1a2e;
+  background: var(--zl-bg);
 }
 
 #main-canvas {
@@ -30,6 +41,11 @@ body {
 
 #main-canvas:active {
   cursor: grabbing;
+}
+
+/* 默认跟随系统：浅色系统 → 白底黑字；深色系统 → 黑底白字。JS 设置可覆盖 :root 变量。 */
+@media (prefers-color-scheme: light) {
+  :root { --zl-bg: #f5f5f0; --zl-fg: #1a1a1a; }
 }
 
 #ui-overlay {
