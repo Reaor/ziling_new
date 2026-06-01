@@ -1294,12 +1294,15 @@ export class MotionEngine {
    * O(N²) 降到 ~O(N)：每趟把里字按 minDist 大小的桶分格，只和相邻 3×3 桶里的里字
    * 比对 → 即便 ~300+ 里字也能 60fps 流畅推开（不再随字数平方变卡）。
    */
-  _resolveDisplayCollisions() {
-    const chars = [...this.characters.values()].filter(char => char.alpha > 0.01);
+  /** 公开：对任意一组里字做去重叠（含过渡/退场/原态等不在引擎里的里字）。minDist 可指定。 */
+  resolveOverlaps(charList, minDist) { this._resolveDisplayCollisions(charList, minDist); }
+
+  _resolveDisplayCollisions(charList, minDistArg) {
+    const chars = (charList || [...this.characters.values()]).filter(char => char.alpha > 0.01 && (char.dispScale == null || char.dispScale > 0));
     const n = chars.length;
     if (n < 2) return;
     const half = this.cellSize / 2;
-    const minDist = this.cellSize * 0.9;
+    const minDist = minDistArg || this.cellSize * 0.9;
     const minDistSq = minDist * minDist;
     const maxX = (this.grid.cols - 1) * this.cellSize;
     const maxY = (this.grid.rows - 1) * this.cellSize;

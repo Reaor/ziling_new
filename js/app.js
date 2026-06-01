@@ -127,7 +127,13 @@ document.addEventListener('DOMContentLoaded', () => {
     resetGlyphCache();
   }
   function applyFont(css) { glyphFont = css || glyphFont; resetGlyphCache(); }
-  function applyColor(hex) { glyphColorOverride = hex || ''; resetGlyphCache(); }
+  function applyColor(hex) {
+    glyphColorOverride = hex || '';
+    // 同步到 CSS 变量，让 DOM（游戏格子/设置/原态放大字若走 DOM）也跟随自定义字色。
+    const root = document.documentElement.style;
+    if (hex) root.setProperty('--zl-fg', hex); else applyThemeMode(loadSettings().mode);
+    resetGlyphCache();
+  }
   function applyFx(v) { themeFx = v || 'none'; resetGlyphCache(); }
   function applyOriginScale(v) { originScale = Math.max(0.6, Math.min(1.8, v || 1)); }
 
@@ -142,12 +148,17 @@ document.addEventListener('DOMContentLoaded', () => {
     glyphSeq = 0;
   };
   const nextGlyph = () => glyphSource[(glyphSeq++) % glyphSource.length];
-  for (let i = 0; i < INITIAL_CHARS; i++) {
-    const col = 2 + (i % 18);
-    const row = 2 + Math.floor(i / 18);
-    const c = pool.acquire(nextGlyph(), col, row);
-    c.alpha = 0;                 // 开屏动画期间隐藏首屏里字（不再闪现测试初始态）
-    motion.registerCharacter(c);
+  // 首屏里字播种在**屏幕中心一小块**（而非左上角），且 displayX/Y 立即设到中心附近 → 开屏结束后
+  // 首次成形从中心散开，不会出现"左边一列字从上往下流"的突兀感。开屏期间 alpha=0 全隐藏。
+  {
+    const cc = Math.floor(gridCols / 2), cr = Math.floor(gridRows / 2);
+    for (let i = 0; i < INITIAL_CHARS; i++) {
+      const col = cc + (i % 8) - 4, row = cr + (Math.floor(i / 8) % 7) - 3;
+      const c = pool.acquire(nextGlyph(), Math.max(0, Math.min(gridCols - 1, col)), Math.max(0, Math.min(gridRows - 1, row)));
+      c.alpha = 0;
+      c.displayX = c.gridX * CELL_SIZE; c.displayY = c.gridY * CELL_SIZE;
+      motion.registerCharacter(c);
+    }
   }
   console.log(`PIBT ready — Grid ${gridCols}x${gridRows}, ${INITIAL_CHARS} characters`);
 
@@ -156,8 +167,8 @@ document.addEventListener('DOMContentLoaded', () => {
   //   - 曲线/数学曲线：单条闭环路径 → flow（里字首尾相连绕圈流动）。
   // `cells` 是该形状里字数上限的提示（越大越密、越清晰）。里字数随掩码格数自适应增减。
   const SHAPES = [
-    { name: '^_^',  cells: 150, make: n => shapes.sampleEmoji('^_^', gridCols, gridRows, n) },
-    { name: '>_<',  cells: 150, make: n => shapes.sampleEmoji('>_<', gridCols, gridRows, n) },
+    // 全部颜文字都纳入互动态随机库（不止 ^_^ / >_<）。
+    ...Object.keys(EMOJI_TEMPLATES).map(k => ({ name: k, cells: 150, make: n => shapes.sampleEmoji(k, gridCols, gridRows, n) })),
     // （互动态循环不含巨字——巨字交给对话态/日程态的 AI 文艺词语呈现；这里只保留颜文字+曲线+动态曲线+特态）
     { name: '爱心', cells: 80,  make: n => shapes.sampleCurveOrdered('heart', gridCols, gridRows, n) },
     { name: '四叶花', cells: 96, make: n => shapes.sampleCurveOrdered('rose', gridCols, gridRows, n) },
@@ -275,28 +286,12 @@ document.addEventListener('DOMContentLoaded', () => {
     return best;
   }
 
-  // 计算"退场焦点"中心：n 个焦点均匀分布在掩码外接框四角的**对角线延长线**上（围在方形外，
-  // 不与方形重叠）。mask 为目标形状/文本的格子；缺省回落到屏幕中心四角。返回像素中心点数组。
-  function despawnFoci(mask, n = SPIRAL_ARMS) {
+  // 掩码外接框的中心（像素）——退场里字朝"远离它"的方向飞出屏幕。
+  function maskCenterPx(mask) {
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const c of mask) { if (c.x < minX) minX = c.x; if (c.x > maxX) maxX = c.x; if (c.y < minY) minY = c.y; if (c.y > maxY) maxY = c.y; }
     if (!isFinite(minX)) { minX = maxX = gridCols / 2; minY = maxY = gridRows / 2; }
-    const cx = (minX + maxX + 1) / 2 * CELL_SIZE, cy = (minY + maxY + 1) / 2 * CELL_SIZE;
-    const halfW = (maxX - minX + 1) / 2 * CELL_SIZE, halfH = (maxY - minY + 1) / 2 * CELL_SIZE;
-    const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE;
-    const out = [];
-    // 四个对角方向（右下/左下/左上/右上），焦点落在方形对角线延长线上、再夹到屏幕安全区内。
-    const diag = [[1, 1], [-1, 1], [-1, -1], [1, -1]];
-    const reach = 1.35; // 焦点离方形角的延伸量（相对半宽/半高）
-    for (let i = 0; i < n; i++) {
-      const [sx, sy] = diag[i % 4];
-      let fx = cx + sx * (halfW * reach + CELL_SIZE * 2);
-      let fy = cy + sy * (halfH * reach + CELL_SIZE * 2);
-      fx = Math.max(CELL_SIZE * 1.5, Math.min(W - CELL_SIZE * 1.5, fx));
-      fy = Math.max(CELL_SIZE * 1.5, Math.min(H - CELL_SIZE * 1.5, fy));
-      out.push({ x: fx, y: fy });
-    }
-    return out;
+    return { x: (minX + maxX + 1) / 2 * CELL_SIZE, y: (minY + maxY + 1) / 2 * CELL_SIZE };
   }
 
   // 增字：沿螺旋臂向内淡入。rank 让同臂里字错峰出发 → 排成"一个接一个"的队列。
@@ -315,21 +310,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // 减字：挑选要退场的里字，分配到若干"焦点"（围在目标形状外的对角延长线上），让它们**从当前位置
-  // 平滑滑向各自焦点并淡出**（不再闪现到中心再沿螺旋飞出）。focusOnMask=true 时焦点围在 mask 周围。
+  // 减字：要退场的里字**从当前位置朝"远离目标形状中心"的方向加速飞出屏幕外并淡出**——各自方向
+  // 不同（按它相对中心的角度），所以是发散离场、不会聚成一堆、也不会压在正在成形的字上面；
+  // 加上每帧全局去重叠（见渲染循环 resolveOverlaps），坚决不重叠。
   function despawnSpiralOut(count, mask) {
-    const foci = despawnFoci(mask, SPIRAL_ARMS);
-    // 每个里字归到"离它最近的焦点"，让滑动路程最短、最自然。
+    const ctr = maskCenterPx(mask);
+    const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE;
+    const reach = Math.hypot(W, H);           // 飞到屏幕外的距离
     const victims = aliveChars().slice(0, count);
     victims.forEach((c, k) => {
       transitIds.add(c.id);
-      motion.unregisterCharacter(c.id); // 退出 PIBT，腾出格子
+      motion.unregisterCharacter(c.id);       // 退出 PIBT，腾出格子
       const sx = c.displayX + CELL_SIZE / 2, sy = c.displayY + CELL_SIZE / 2;
-      // 选最近焦点
-      let fi = 0, fd = Infinity;
-      for (let i = 0; i < foci.length; i++) { const d = (foci[i].x - sx) ** 2 + (foci[i].y - sy) ** 2; if (d < fd) { fd = d; fi = i; } }
+      let ang = Math.atan2(sy - ctr.y, sx - ctr.x);
+      if (!isFinite(ang) || (Math.abs(sx - ctr.x) < 1 && Math.abs(sy - ctr.y) < 1)) ang = Math.random() * Math.PI * 2;
+      const fx = sx + Math.cos(ang) * reach, fy = sy + Math.sin(ang) * reach;
       const rank = Math.floor(k / SPIRAL_ARMS);
-      transit.push({ char: c, mode: 'out', sx, sy, fx: foci[fi].x, fy: foci[fi].y,
+      transit.push({ char: c, mode: 'out', sx, sy, fx, fy, ang,
         elapsed: -rank * SPIRAL_STAGGER_MS, dur: SPIRAL_MS });
     });
     if (victims.length) reformPending = true;
@@ -376,13 +373,12 @@ document.addEventListener('DOMContentLoaded', () => {
         a.char.displayY = a.center.y + rr * Math.sin(theta) - CELL_SIZE / 2;
         a.char.alpha = p;
       } else {
-        // 向外退场：从里字**当前位置**先加速滑向其焦点（ease-in，越靠近越聚拢），到焦点处淡出。
-        // 加一点点螺旋切向偏移让聚拢有"卷入"感、不死板；多个字汇到同一焦点 → 自然形成"焦点"。
-        const e = p * p;                                  // ease-in：起步慢、靠近焦点时快（加速聚拢）
-        const swirl = (1 - p) * CELL_SIZE * 1.2 * Math.sin(p * Math.PI * 2 + a.fx);
-        a.char.displayX = a.sx + (a.fx - a.sx) * e - CELL_SIZE / 2 + swirl;
-        a.char.displayY = a.sy + (a.fy - a.sy) * e - CELL_SIZE / 2;
-        a.char.alpha = p < 0.7 ? 1 : (1 - p) / 0.3;       // 后 30% 淡出
+        // 向外退场：从当前位置朝远离中心方向**加速飞出**（ease-in），中途即淡出 → 干净离场。
+        const e = p * p;                                  // ease-in：起步顺、越走越快地离开
+        const swirl = Math.sin(p * Math.PI * 2) * CELL_SIZE * 0.6 * (1 - p); // 轻微弧线，不死板
+        a.char.displayX = a.sx + (a.fx - a.sx) * e - Math.sin(a.ang) * swirl - CELL_SIZE / 2;
+        a.char.displayY = a.sy + (a.fy - a.sy) * e + Math.cos(a.ang) * swirl - CELL_SIZE / 2;
+        a.char.alpha = 1 - e;                             // 随飞出渐隐
       }
       if (p >= 1) {
         if (a.mode === 'in') finalizeSpiralIn(a);
@@ -495,6 +491,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (def.clock) { applyClock(); return; }
     if (def.snake) { applySnake(); return; }
     formSampled(def.make(def.cells), def.name);
+  }
+  // 互动态自动循环用：真随机选一个与当前不同的形态下标。
+  function randomShapeIndex() {
+    if (SHAPES.length <= 1) return shapeIndex;
+    let r = shapeIndex;
+    while (r === shapeIndex) r = (Math.random() * SHAPES.length) | 0;
+    return r;
   }
 
   // ── 北京时间（即时时分秒）──────────────────────────────────────────────
@@ -927,7 +930,7 @@ document.addEventListener('DOMContentLoaded', () => {
           interactiveTimer = setTimeout(() => { exitConversation(); tick(); }, 16000);
         }).catch(() => { convoActive = false; interactiveTimer = setTimeout(tick, 6000); });
       } else {
-        applyShape(shapeIndex + 1 + ((Math.random() * 3) | 0)); // 随机往后跳 1~3 个形状
+        applyShape(randomShapeIndex());                            // 真随机选下一个形态（不与当前重复）
         interactiveTimer = setTimeout(tick, 13000 + Math.random() * 7000); // 互动态切换更从容，不变太快
       }
     };
@@ -1585,7 +1588,7 @@ document.addEventListener('DOMContentLoaded', () => {
       // 对话态中双击 = 打断回复流、从被打断处重新展开（收束 L22）。
       if (convoActive && lastUserMsg) { resumeConvo(); return; }
       if (inOrigin || originHold) { enterShape(false); return; } // 原态→动态（回到当前形状）
-      applyShape(shapeIndex + 1);                   // 动态→切下一个形状
+      applyShape(randomShapeIndex());               // 动态→随机切一个形态
     },
 
     onLongPress() {
@@ -1788,6 +1791,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     updateSpirals(dtMs); // 螺旋淡入/淡出（在显示位置更新之后，覆盖过渡里字的显示）
     if (microEnv > 0) microEnv = Math.max(0, microEnv - dtMs / MICRO_DECAY_MS);
+
+    // 全局去重叠：常态下对**所有可见里字**（在册流动 + 正在退场的过渡里字）统一推开 ——
+    // 引擎自身只对在册里字去重叠，退场里字已脱离引擎，靠这里保证它们不压到留场的字。
+    // 原态（旋转方环团 / 放大文本）与拖动环绕态各自管理紧凑/旋转间距（属有意效果），跳过，
+    // 不让全局推挤破坏方环团的紧凑或放大文本的整齐；退场里字此时朝中心外发散，本就远离它们。
+    // 仅在有"退场过渡里字"时才需要这一遍（在册里字已由引擎内部去重叠）→ 省去常态的冗余开销。
+    if (transit.length && !motion.isOrbiting() && !originAnim && !originHold) {
+      const vis = pool.getAll().filter(c => (c.alpha == null || c.alpha > 0.02));
+      motion.resolveOverlaps(vis, CELL_SIZE * 0.9);
+    }
 
     if (DEBUG) {
       const checkSec = Math.floor(now / 5000);
