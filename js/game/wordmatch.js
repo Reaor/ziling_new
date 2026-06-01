@@ -135,17 +135,13 @@ export class WordMatch {
     // 还没有激活的字 → 激活当前。
     if (this.sel == null) { this.sel = i; this._setActive(i, true); return; }
 
-    // 已有一个激活字 + 点了另一个 → 判定这两个字能否组词（顺序不论）。
+    // 已有一个激活字 + 点了另一个 → 一律请求 AI 判定（本地词库有漏洞，交给 AI 更准）。
     const i1 = this.sel, i2 = i;
     const a = this.cells[i1].ch, b = this.cells[i2].ch;
-    this._setActive(i2, true);                   // 第二个也高亮，明确"正在判定这两个"
-    if (WORDS.has(a + b) || WORDS.has(b + a)) {   // 本地命中 → 即时判对
-      this.sel = null;
-      this._clearPair(i1, i2, WORDS.has(a + b) ? a + b : b + a);
-      return;
-    }
-    // 本地未命中 → 问 AI 兜底（等待期两字脉动缓解延时）。无论判对判错，结束都清除两字激活。
-    this.busy = true; this.sel = null;
+    this.sel = null;
+    this._setActive(i2, true);
+    // 等待期：两格持续颤动（shimmer），缓解请求延时的不耐烦。无论判对判错，结束都清除两格状态。
+    this.busy = true;
     this._pulse(i1, true); this._pulse(i2, true);
     const done = (ok, word) => {
       this.busy = false;
@@ -153,6 +149,8 @@ export class WordMatch {
       if (ok) { this._clearPair(i1, i2, word); }
       else { this._shake(i1); this._shake(i2); this._setActive(i1, false); this._setActive(i2, false); }
     };
+    // 本地词库命中可直接判对（即时、省一次请求）；未命中才真正问 AI。两条路都顺序不论。
+    if (WORDS.has(a + b) || WORDS.has(b + a)) { done(true, WORDS.has(a + b) ? a + b : b + a); return; }
     ai.validateWord(a, b)
       .then(res => done(!!(res && res.valid), (res && res.word) || (a + b)))
       .catch(() => done(false));

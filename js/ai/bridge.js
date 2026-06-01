@@ -123,10 +123,16 @@ export async function chat(message, history = [], ctx = {}) {
   return mockChat(message, hist, schedule);
 }
 
-/** 游戏态：组词判定 → { valid, word? } */
+/** 游戏态：组词判定 → { valid, word? }。本地词库未命中时由 AI（后端或自带 key 直连）判别。 */
 export async function validateWord(char1, char2) {
   try {
     if (aiSource() === 'backend') return await backend('/api/validate', { char1, char2 });
+    if (aiSource() === 'direct') {
+      const sys = '你是中文组词判定器。判断给的两个汉字能否（顺序不论）组成一个有意义的常用词语。'
+        + '只输出 JSON：{"valid":true,"word":"组成的词"} 或 {"valid":false}。不要解释。';
+      const out = await direct(sys, `两个字：${char1}、${char2}`);
+      return { valid: !!(out && out.valid), word: out && out.word };
+    }
   } catch (e) { console.warn('[ai] validate fallback to mock:', e.message); }
   return mockValidate(char1, char2);
 }
