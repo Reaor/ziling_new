@@ -69,6 +69,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const renderer = new Renderer('main-canvas');
   const { cssWidth, cssHeight } = renderer.init();
 
+  // 开屏动画期间先隐藏 UI 按钮（入场结束后 revealUI 再柔和淡入）。
+  { const ov = document.getElementById('ui-overlay'); if (ov) ov.style.opacity = '0'; }
+
   const gridCols = Math.floor(cssWidth / CELL_SIZE);
   const gridRows = Math.floor(cssHeight / CELL_SIZE);
   const grid = new Grid(gridCols, gridRows);
@@ -272,6 +275,30 @@ document.addEventListener('DOMContentLoaded', () => {
     return best;
   }
 
+  // 计算"退场焦点"中心：n 个焦点均匀分布在掩码外接框四角的**对角线延长线**上（围在方形外，
+  // 不与方形重叠）。mask 为目标形状/文本的格子；缺省回落到屏幕中心四角。返回像素中心点数组。
+  function despawnFoci(mask, n = SPIRAL_ARMS) {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const c of mask) { if (c.x < minX) minX = c.x; if (c.x > maxX) maxX = c.x; if (c.y < minY) minY = c.y; if (c.y > maxY) maxY = c.y; }
+    if (!isFinite(minX)) { minX = maxX = gridCols / 2; minY = maxY = gridRows / 2; }
+    const cx = (minX + maxX + 1) / 2 * CELL_SIZE, cy = (minY + maxY + 1) / 2 * CELL_SIZE;
+    const halfW = (maxX - minX + 1) / 2 * CELL_SIZE, halfH = (maxY - minY + 1) / 2 * CELL_SIZE;
+    const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE;
+    const out = [];
+    // 四个对角方向（右下/左下/左上/右上），焦点落在方形对角线延长线上、再夹到屏幕安全区内。
+    const diag = [[1, 1], [-1, 1], [-1, -1], [1, -1]];
+    const reach = 1.35; // 焦点离方形角的延伸量（相对半宽/半高）
+    for (let i = 0; i < n; i++) {
+      const [sx, sy] = diag[i % 4];
+      let fx = cx + sx * (halfW * reach + CELL_SIZE * 2);
+      let fy = cy + sy * (halfH * reach + CELL_SIZE * 2);
+      fx = Math.max(CELL_SIZE * 1.5, Math.min(W - CELL_SIZE * 1.5, fx));
+      fy = Math.max(CELL_SIZE * 1.5, Math.min(H - CELL_SIZE * 1.5, fy));
+      out.push({ x: fx, y: fy });
+    }
+    return out;
+  }
+
   // 增字：沿螺旋臂向内淡入。rank 让同臂里字错峰出发 → 排成"一个接一个"的队列。
   function spawnSpiralIn(count, mask) {
     const center = shapeCenterPx(mask);
@@ -288,20 +315,21 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // 减字：挑离中心最远的里字，沿螺旋臂向外淡出后回收。
+  // 减字：挑选要退场的里字，分配到若干"焦点"（围在目标形状外的对角延长线上），让它们**从当前位置
+  // 平滑滑向各自焦点并淡出**（不再闪现到中心再沿螺旋飞出）。focusOnMask=true 时焦点围在 mask 周围。
   function despawnSpiralOut(count, mask) {
-    const center = shapeCenterPx(mask);
-    const rIn = Math.max(CELL_SIZE * 2, shapeRadiusPx(mask, center) * 0.5);
-    const rOut = rIn + CELL_SIZE * 9;
-    const victims = aliveChars()
-      .map(c => ({ c, d: (c.displayX - center.x) ** 2 + (c.displayY - center.y) ** 2 }))
-      .sort((a, b) => b.d - a.d).slice(0, count).map(o => o.c);
+    const foci = despawnFoci(mask, SPIRAL_ARMS);
+    // 每个里字归到"离它最近的焦点"，让滑动路程最短、最自然。
+    const victims = aliveChars().slice(0, count);
     victims.forEach((c, k) => {
-      const arm = k % SPIRAL_ARMS, rank = Math.floor(k / SPIRAL_ARMS);
       transitIds.add(c.id);
       motion.unregisterCharacter(c.id); // 退出 PIBT，腾出格子
-      transit.push({ char: c, mode: 'out', center, rIn, rOut, mask,
-        base: (arm / SPIRAL_ARMS) * Math.PI * 2,
+      const sx = c.displayX + CELL_SIZE / 2, sy = c.displayY + CELL_SIZE / 2;
+      // 选最近焦点
+      let fi = 0, fd = Infinity;
+      for (let i = 0; i < foci.length; i++) { const d = (foci[i].x - sx) ** 2 + (foci[i].y - sy) ** 2; if (d < fd) { fd = d; fi = i; } }
+      const rank = Math.floor(k / SPIRAL_ARMS);
+      transit.push({ char: c, mode: 'out', sx, sy, fx: foci[fi].x, fy: foci[fi].y,
         elapsed: -rank * SPIRAL_STAGGER_MS, dur: SPIRAL_MS });
     });
     if (victims.length) reformPending = true;
@@ -340,14 +368,22 @@ document.addEventListener('DOMContentLoaded', () => {
       const a = transit[i];
       a.elapsed += dtMs;
       const p = Math.max(0, Math.min(1, a.elapsed / a.dur));
-      // 向内：r 从 rOut→rIn、alpha 0→1；向外：r 从 rIn→rOut、alpha 1→0。
-      const rr = a.mode === 'in'
-        ? a.rOut + (a.rIn - a.rOut) * ease(p)
-        : a.rIn + (a.rOut - a.rIn) * ease(p);
-      const theta = a.base + SPIRAL_TURNS * Math.PI * 2 * (1 - (rr - a.rIn) / (a.rOut - a.rIn));
-      a.char.displayX = a.center.x + rr * Math.cos(theta) - CELL_SIZE / 2;
-      a.char.displayY = a.center.y + rr * Math.sin(theta) - CELL_SIZE / 2;
-      a.char.alpha = a.mode === 'in' ? p : (1 - p);
+      if (a.mode === 'in') {
+        // 向内：沿螺旋臂 r 从 rOut→rIn、alpha 0→1。
+        const rr = a.rOut + (a.rIn - a.rOut) * ease(p);
+        const theta = a.base + SPIRAL_TURNS * Math.PI * 2 * (1 - (rr - a.rIn) / (a.rOut - a.rIn));
+        a.char.displayX = a.center.x + rr * Math.cos(theta) - CELL_SIZE / 2;
+        a.char.displayY = a.center.y + rr * Math.sin(theta) - CELL_SIZE / 2;
+        a.char.alpha = p;
+      } else {
+        // 向外退场：从里字**当前位置**先加速滑向其焦点（ease-in，越靠近越聚拢），到焦点处淡出。
+        // 加一点点螺旋切向偏移让聚拢有"卷入"感、不死板；多个字汇到同一焦点 → 自然形成"焦点"。
+        const e = p * p;                                  // ease-in：起步慢、靠近焦点时快（加速聚拢）
+        const swirl = (1 - p) * CELL_SIZE * 1.2 * Math.sin(p * Math.PI * 2 + a.fx);
+        a.char.displayX = a.sx + (a.fx - a.sx) * e - CELL_SIZE / 2 + swirl;
+        a.char.displayY = a.sy + (a.fy - a.sy) * e - CELL_SIZE / 2;
+        a.char.alpha = p < 0.7 ? 1 : (1 - p) / 0.3;       // 后 30% 淡出
+      }
       if (p >= 1) {
         if (a.mode === 'in') finalizeSpiralIn(a);
         else pool.release(a.char.id);
@@ -892,7 +928,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }).catch(() => { convoActive = false; interactiveTimer = setTimeout(tick, 6000); });
       } else {
         applyShape(shapeIndex + 1 + ((Math.random() * 3) | 0)); // 随机往后跳 1~3 个形状
-        interactiveTimer = setTimeout(tick, 9500 + Math.random() * 5000); // 复杂形状成型后充分停留
+        interactiveTimer = setTimeout(tick, 13000 + Math.random() * 7000); // 互动态切换更从容，不变太快
       }
     };
     interactiveTimer = setTimeout(tick, 6000);
@@ -926,7 +962,8 @@ document.addEventListener('DOMContentLoaded', () => {
     convoWaitId = setInterval(() => applyEmojiKey(keys[(Math.random() * keys.length) | 0]), 700);
     applyEmojiKey(keys[(Math.random() * keys.length) | 0]);
     let data;
-    try { data = await ai.chat(text, convoHistory.slice(-8)); }
+    // 带上当前日程上下文 → AI 能基于用户本身的日程/完成情况给专业、个性化的回答。
+    try { data = await ai.chat(text, convoHistory.slice(-8), { schedule: lastSchedule }); }
     finally { clearInterval(convoWaitId); convoWaitId = null; }
     convoHistory.push({ role: 'assistant', content: data.quickReply || '' });
     runConvoPhases(data);
@@ -934,9 +971,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 呈现停留时长：原态文本/颜文字/巨字各自"成型后再多停留一会儿"才切换（避免没成型就消失）。
   // 原态过渡本身约 ORIGIN_MS(2.2s)；颜文字/巨字满填流动需约 1.6s 成型 → 留足 settle + 阅读时间。
-  const DWELL_ORIGIN = ORIGIN_MS + 3000;   // 原态：过渡(2.2s)+阅读(3.0s)
-  const DWELL_EMOJI = 6500;                 // 颜文字：成型(~1.6s)+充分停留观赏
-  const DWELL_MEGA = 7000;                  // 巨字/复杂形状：成型(可达 2s)+充分停留再切（用户要求更久）
+  const DWELL_ORIGIN = ORIGIN_MS + 3800;   // 原态：过渡(2.2s)+阅读(3.8s)
+  const DWELL_EMOJI = 8500;                 // 颜文字：成型 + 充分停留观赏（进一步拉长）
+  const DWELL_MEGA = 9000;                  // 巨字/复杂形状：成型(可达 2s)+长停留再切
 
   // PHASE1 原态简洁回复 → PHASE2 巨字 → PHASE3 回复流(text 原态 ↔ emoji/巨字 循环)。
   function runConvoPhases(data) {
@@ -1588,24 +1625,38 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ── Render loop ───────────────────────────────────────────
-  // ── 开屏动画（电路线汇聚 → ^_^ 浮现 → 右眼 wink → 丝滑结束 → 呈现日程）──────────
-  // 颜色跟随系统主题（白底黑 / 黑底白）：线与字用 --zl-fg，背景用 --zl-bg（canvas 已透明叠在容器上）。
+  // ── 开屏动画（电路线如颜料注入 → 染出 logo 风 ^_^ → 右眼 wink → 高级淡出 → 呈现日程）──
+  // 思路：许多细线从画面外沿电路风折线汇向中心脸部轮廓，像"注入颜料"一样逐步把 ^_^ 染显出来；
+  // 注入完成线即隐去，脸短暂保持并 wink，随后整体高级淡出。颜色用高级强调色 INTRO_ACCENT。
   const intro = { active: true, t: 0, lines: null, done: false };
-  const INTRO_LINES_MS = 1500, INTRO_CONVERGE_MS = 500, INTRO_FACE_MS = 1700, INTRO_TOTAL = 3700;
-  function buildIntroLines(W, H) {
-    const cx = W / 2, cy = H / 2, n = 26, arr = [];
+  // 阶段：注入(线流入+脸渐染) → 保持/wink → 淡出。
+  const INTRO_INJECT_MS = 1700, INTRO_HOLD_MS = 1300, INTRO_FADE_MS = 700;
+  const INTRO_TOTAL = INTRO_INJECT_MS + INTRO_HOLD_MS + INTRO_FADE_MS;
+  const INTRO_ACCENT = '#5ec8d8';   // 高级强调色（青蓝），染色与脸用它；深浅主题都耐看
+  // logo 风 ^_^ 的笔画（相对中心、单位尺度 S）：左眼^、右眼^（wink 时变弧）、嘴⌣。粗线、圆头。
+  function faceStrokes(cx, cy, S, winking) {
+    const eyeGap = S * 0.92, eyeY = cy - S * 0.22, eyeW = S * 0.46;
+    const hat = (ex) => [[ex - eyeW / 2, eyeY + eyeW * 0.5], [ex, eyeY - eyeW * 0.45], [ex + eyeW / 2, eyeY + eyeW * 0.5]];
+    const strokes = [hat(cx - eyeGap / 2)];
+    if (winking) strokes.push([[cx + eyeGap / 2 - eyeW / 2, eyeY + eyeW * 0.12], [cx + eyeGap / 2, eyeY + eyeW * 0.5], [cx + eyeGap / 2 + eyeW / 2, eyeY + eyeW * 0.12]]);
+    else strokes.push(hat(cx + eyeGap / 2));
+    strokes.push([[cx - S * 0.34, cy + S * 0.40], [cx, cy + S * 0.56], [cx + S * 0.34, cy + S * 0.40]]); // 嘴
+    return strokes;
+  }
+  function buildIntroLines(W, H, cx, cy) {
+    const n = 30, arr = [];
     for (let i = 0; i < n; i++) {
-      // 从画面外某点，沿"曼哈顿折线（电路风）"走向中心附近的汇聚点。
       const edge = i % 4, t = (i * 9301 % 1000) / 1000;
       let sx, sy;
       if (edge === 0) { sx = -20; sy = H * t; }
       else if (edge === 1) { sx = W + 20; sy = H * t; }
       else if (edge === 2) { sx = W * t; sy = -20; }
       else { sx = W * t; sy = H + 20; }
-      const ex = cx + (t - 0.5) * 34, ey = cy + ((i % 7) - 3) * 8;
-      // 折点：先水平后垂直（或反之）→ 直角电路走线。
+      // 终点散布在脸部区域（让线像注入脸部），折线直角走线（电路风）。
+      const ex = cx + (t - 0.5) * Math.min(W, H) * 0.34;
+      const ey = cy + (((i * 7) % 11) / 11 - 0.5) * Math.min(W, H) * 0.34;
       const midX = (i % 2) ? ex : sx, midY = (i % 2) ? sy : ey;
-      arr.push({ sx, sy, midX, midY, ex, ey, delay: t * 0.5 });
+      arr.push({ sx, sy, midX, midY, ex, ey, delay: t * 0.45 });
     }
     return arr;
   }
@@ -1613,83 +1664,62 @@ document.addEventListener('DOMContentLoaded', () => {
     intro.t += dtMs;
     const ctx = renderer.getContext();
     const W = renderer.cssWidth, H = renderer.cssHeight, cx = W / 2, cy = H / 2;
-    const fg = getThemeFg();
-    if (!intro.lines) intro.lines = buildIntroLines(W, H);
+    const S = Math.min(W, H) * 0.20;
+    if (!intro.lines) intro.lines = buildIntroLines(W, H, cx, cy);
     ctx.save();
-    ctx.lineWidth = 1; ctx.strokeStyle = fg; ctx.lineCap = 'round';
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
 
-    // 阶段1：电路线从外延伸进来（0..INTRO_LINES_MS）。
-    const lp = Math.min(1, intro.t / INTRO_LINES_MS);
-    // 阶段2：汇聚到中心后淡出（INTRO_LINES_MS .. +CONVERGE）。
-    const conv = Math.max(0, Math.min(1, (intro.t - INTRO_LINES_MS) / INTRO_CONVERGE_MS));
-    const lineAlpha = 1 - conv;
-    if (lineAlpha > 0.01) {
-      ctx.globalAlpha = lineAlpha;
+    const inject = Math.min(1, intro.t / INTRO_INJECT_MS);                 // 0→1 注入进度
+    const fade = intro.t > INTRO_TOTAL - INTRO_FADE_MS
+      ? Math.max(0, (INTRO_TOTAL - intro.t) / INTRO_FADE_MS) : 1;          // 末尾整体淡出
+    const winking = intro.t > INTRO_INJECT_MS + 350 && intro.t < INTRO_INJECT_MS + 950;
+
+    // 1) 注入线：注入阶段流入；越接近完成越淡（颜料注入完线就隐去）。线随 inject 收尾而消退。
+    const lineFade = Math.max(0, 1 - Math.max(0, (inject - 0.7) / 0.3));   // inject 70%→100% 淡出线
+    if (lineFade > 0.01) {
+      ctx.strokeStyle = INTRO_ACCENT; ctx.lineWidth = 1.4; ctx.globalAlpha = lineFade * fade * 0.9;
       for (const ln of intro.lines) {
-        const p = Math.max(0, Math.min(1, (lp - ln.delay) / (1 - ln.delay + 1e-6)));
+        const p = Math.max(0, Math.min(1, (inject - ln.delay) / (1 - ln.delay + 1e-6)));
         if (p <= 0) continue;
-        // 折线总长按 p 推进：先 seg1(起点→折点) 再 seg2(折点→汇聚点)。
         ctx.beginPath(); ctx.moveTo(ln.sx, ln.sy);
-        if (p < 0.5) {
-          const q = p / 0.5;
-          ctx.lineTo(ln.sx + (ln.midX - ln.sx) * q, ln.sy + (ln.midY - ln.sy) * q);
-        } else {
-          ctx.lineTo(ln.midX, ln.midY);
-          const q = (p - 0.5) / 0.5;
-          ctx.lineTo(ln.midX + (ln.ex - ln.midX) * q, ln.midY + (ln.ey - ln.midY) * q);
-        }
+        if (p < 0.5) { const q = p / 0.5; ctx.lineTo(ln.sx + (ln.midX - ln.sx) * q, ln.sy + (ln.midY - ln.sy) * q); }
+        else { ctx.lineTo(ln.midX, ln.midY); const q = (p - 0.5) / 0.5; ctx.lineTo(ln.midX + (ln.ex - ln.midX) * q, ln.midY + (ln.ey - ln.midY) * q); }
         ctx.stroke();
       }
-      // 汇聚核心的小亮点
-      ctx.globalAlpha = lineAlpha * (0.4 + 0.6 * lp);
-      ctx.fillStyle = fg;
-      ctx.beginPath(); ctx.arc(cx, cy, 2 + 3 * conv, 0, Math.PI * 2); ctx.fill();
     }
 
-    // 阶段3：^_^ 从中心浮现，右眼 wink 成 ^_~（INTRO_LINES_MS+CONVERGE 之后）。
-    const faceStart = INTRO_LINES_MS + INTRO_CONVERGE_MS;
-    const fp = Math.max(0, Math.min(1, (intro.t - faceStart) / INTRO_FACE_MS));
-    if (fp > 0) {
-      const appear = Math.min(1, fp / 0.4);             // 前 40% 浮现
-      const fade = intro.t > INTRO_TOTAL - 400 ? Math.max(0, (INTRO_TOTAL - intro.t) / 400) : 1; // 末尾淡出
-      const pop = 0.9 + 0.1 * Math.min(1, fp / 0.4);    // 轻微放大浮现
-      ctx.globalAlpha = appear * fade;
-      ctx.strokeStyle = fg; ctx.fillStyle = fg;
-      const S = Math.min(W, H) * 0.16 * pop;             // 整脸尺度
-      const eyeGap = S * 0.95, eyeY = cy - S * 0.18, eyeW = S * 0.42;
-      ctx.lineWidth = Math.max(2, S * 0.07); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-      // 左眼：^（两段斜线）
-      const drawHat = (ex) => { ctx.beginPath(); ctx.moveTo(ex - eyeW / 2, eyeY + eyeW * 0.5);
-        ctx.lineTo(ex, eyeY - eyeW * 0.4); ctx.lineTo(ex + eyeW / 2, eyeY + eyeW * 0.5); ctx.stroke(); };
-      // 右眼 wink：~（一段下弯弧），否则也画 ^
-      const winking = fp > 0.55 && fp < 0.92;
-      drawHat(cx - eyeGap / 2);
-      if (winking) {
-        ctx.beginPath();
-        ctx.moveTo(cx + eyeGap / 2 - eyeW / 2, eyeY + eyeW * 0.1);
-        ctx.quadraticCurveTo(cx + eyeGap / 2, eyeY + eyeW * 0.55, cx + eyeGap / 2 + eyeW / 2, eyeY + eyeW * 0.1);
-        ctx.stroke();
-      } else {
-        drawHat(cx + eyeGap / 2);
+    // 2) 脸：被"染出来"——笔画按 inject 进度从中心向两端逐段显现（dye），logo 风粗线圆头。
+    //    注入完成后保持 + wink；末尾随 fade 整体淡出。
+    const dye = easeIO(inject);
+    ctx.strokeStyle = INTRO_ACCENT; ctx.lineWidth = Math.max(3, S * 0.11); ctx.globalAlpha = fade;
+    for (const st of faceStrokes(cx, cy, S, winking)) {
+      // 沿折线按 dye 比例画出（从首端逐步染到尾端）。
+      const segs = st.length - 1, total = dye * segs;
+      ctx.beginPath(); ctx.moveTo(st[0][0], st[0][1]);
+      for (let s = 0; s < segs; s++) {
+        const f = Math.max(0, Math.min(1, total - s));
+        if (f <= 0) break;
+        ctx.lineTo(st[s][0] + (st[s + 1][0] - st[s][0]) * f, st[s][1] + (st[s + 1][1] - st[s][1]) * f);
       }
-      // 嘴：_（小横线，略带弧度的微笑）
-      ctx.beginPath();
-      ctx.moveTo(cx - S * 0.30, cy + S * 0.42);
-      ctx.quadraticCurveTo(cx, cy + S * 0.56, cx + S * 0.30, cy + S * 0.42);
       ctx.stroke();
     }
     ctx.restore();
 
     if (intro.t >= INTRO_TOTAL && !intro.done) {
       intro.done = true; intro.active = false;
-      startAfterIntro();   // 开屏结束 → 呈现日程 / 默认原态
+      startAfterIntro();
     }
   }
   function skipIntro() { if (intro.active) { intro.active = false; intro.done = true; startAfterIntro(); } }
   function startAfterIntro() {
-    // 开屏后：若已收到宿主日程则呈现日程态；否则默认原态文本行。
+    revealUI();   // 开屏结束才浮现 UI 按钮（柔和淡入）
     if (lastSchedule) presentSchedule(lastSchedule);
     else formOriginText(defaultOriginText);
+  }
+  // UI 浮现：把 overlay 从隐藏柔和淡入（入场前按钮不出现）。
+  function revealUI() {
+    const ov = document.getElementById('ui-overlay');
+    if (ov) { ov.style.transition = 'opacity .5s ease'; ov.style.opacity = '1'; }
   }
 
   const DEBUG = new URLSearchParams(window.location.search).get('debug') === '1';
