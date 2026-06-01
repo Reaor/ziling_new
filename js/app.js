@@ -288,30 +288,6 @@ document.addEventListener('DOMContentLoaded', () => {
     return best;
   }
 
-  // 计算"退场焦点"中心：n 个焦点均匀分布在掩码外接框四角的**对角线延长线**上（围在方形外，
-  // 不与方形重叠）。mask 为目标形状/文本的格子；缺省回落到屏幕中心四角。返回像素中心点数组。
-  function despawnFoci(mask, n = SPIRAL_ARMS) {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    for (const c of mask) { if (c.x < minX) minX = c.x; if (c.x > maxX) maxX = c.x; if (c.y < minY) minY = c.y; if (c.y > maxY) maxY = c.y; }
-    if (!isFinite(minX)) { minX = maxX = gridCols / 2; minY = maxY = gridRows / 2; }
-    const cx = (minX + maxX + 1) / 2 * CELL_SIZE, cy = (minY + maxY + 1) / 2 * CELL_SIZE;
-    const halfW = (maxX - minX + 1) / 2 * CELL_SIZE, halfH = (maxY - minY + 1) / 2 * CELL_SIZE;
-    const W = gridCols * CELL_SIZE, H = gridRows * CELL_SIZE;
-    const out = [];
-    // 四个对角方向（右下/左下/左上/右上），焦点落在方形对角线延长线上、再夹到屏幕安全区内。
-    const diag = [[1, 1], [-1, 1], [-1, -1], [1, -1]];
-    const reach = 1.35; // 焦点离方形角的延伸量（相对半宽/半高）
-    for (let i = 0; i < n; i++) {
-      const [sx, sy] = diag[i % 4];
-      let fx = cx + sx * (halfW * reach + CELL_SIZE * 2);
-      let fy = cy + sy * (halfH * reach + CELL_SIZE * 2);
-      fx = Math.max(CELL_SIZE * 1.5, Math.min(W - CELL_SIZE * 1.5, fx));
-      fy = Math.max(CELL_SIZE * 1.5, Math.min(H - CELL_SIZE * 1.5, fy));
-      out.push({ x: fx, y: fy });
-    }
-    return out;
-  }
-
   // 增字：沿螺旋臂向内淡入。rank 让同臂里字错峰出发 → 排成"一个接一个"的队列。
   function spawnSpiralIn(count, mask) {
     const center = shapeCenterPx(mask);
@@ -328,21 +304,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  // 减字：挑选要退场的里字，分配到若干"焦点"（围在目标形状外的对角延长线上），让它们**从当前位置
-  // 平滑滑向各自焦点并淡出**（不再闪现到中心再沿螺旋飞出）。
+  // 减字：挑离中心最远的里字，沿螺旋臂向外淡出后回收。
   function despawnSpiralOut(count, mask) {
-    const foci = despawnFoci(mask, SPIRAL_ARMS);
-    // 每个里字归到"离它最近的焦点"，让滑动路程最短、最自然。
-    const victims = aliveChars().slice(0, count);
+    const center = shapeCenterPx(mask);
+    const rIn = Math.max(CELL_SIZE * 2, shapeRadiusPx(mask, center) * 0.5);
+    const rOut = rIn + CELL_SIZE * 9;
+    const victims = aliveChars()
+      .map(c => ({ c, d: (c.displayX - center.x) ** 2 + (c.displayY - center.y) ** 2 }))
+      .sort((a, b) => b.d - a.d).slice(0, count).map(o => o.c);
     victims.forEach((c, k) => {
+      const arm = k % SPIRAL_ARMS, rank = Math.floor(k / SPIRAL_ARMS);
       transitIds.add(c.id);
       motion.unregisterCharacter(c.id); // 退出 PIBT，腾出格子
-      const sx = c.displayX + CELL_SIZE / 2, sy = c.displayY + CELL_SIZE / 2;
-      // 选最近焦点
-      let fi = 0, fd = Infinity;
-      for (let i = 0; i < foci.length; i++) { const d = (foci[i].x - sx) ** 2 + (foci[i].y - sy) ** 2; if (d < fd) { fd = d; fi = i; } }
-      const rank = Math.floor(k / SPIRAL_ARMS);
-      transit.push({ char: c, mode: 'out', sx, sy, fx: foci[fi].x, fy: foci[fi].y,
+      transit.push({ char: c, mode: 'out', center, rIn, rOut, mask,
+        base: (arm / SPIRAL_ARMS) * Math.PI * 2,
         elapsed: -rank * SPIRAL_STAGGER_MS, dur: SPIRAL_MS });
     });
     if (victims.length) reformPending = true;
@@ -381,22 +356,14 @@ document.addEventListener('DOMContentLoaded', () => {
       const a = transit[i];
       a.elapsed += dtMs;
       const p = Math.max(0, Math.min(1, a.elapsed / a.dur));
-      if (a.mode === 'in') {
-        // 向内：沿螺旋臂 r 从 rOut→rIn、alpha 0→1。
-        const rr = a.rOut + (a.rIn - a.rOut) * ease(p);
-        const theta = a.base + SPIRAL_TURNS * Math.PI * 2 * (1 - (rr - a.rIn) / (a.rOut - a.rIn));
-        a.char.displayX = a.center.x + rr * Math.cos(theta) - CELL_SIZE / 2;
-        a.char.displayY = a.center.y + rr * Math.sin(theta) - CELL_SIZE / 2;
-        a.char.alpha = p;
-      } else {
-        // 向外退场：从里字**当前位置**先加速滑向其焦点（ease-in，越靠近越聚拢），到焦点处淡出。
-        // 加一点点螺旋切向偏移让聚拢有"卷入"感、不死板；多个字汇到同一焦点 → 自然形成"焦点"。
-        const e = p * p;                                  // ease-in：起步慢、靠近焦点时快（加速聚拢）
-        const swirl = (1 - p) * CELL_SIZE * 1.2 * Math.sin(p * Math.PI * 2 + a.fx);
-        a.char.displayX = a.sx + (a.fx - a.sx) * e - CELL_SIZE / 2 + swirl;
-        a.char.displayY = a.sy + (a.fy - a.sy) * e - CELL_SIZE / 2;
-        a.char.alpha = p < 0.7 ? 1 : (1 - p) / 0.3;       // 后 30% 淡出
-      }
+      // 向内：r 从 rOut→rIn、alpha 0→1；向外：r 从 rIn→rOut、alpha 1→0。
+      const rr = a.mode === 'in'
+        ? a.rOut + (a.rIn - a.rOut) * ease(p)
+        : a.rIn + (a.rOut - a.rIn) * ease(p);
+      const theta = a.base + SPIRAL_TURNS * Math.PI * 2 * (1 - (rr - a.rIn) / (a.rOut - a.rIn));
+      a.char.displayX = a.center.x + rr * Math.cos(theta) - CELL_SIZE / 2;
+      a.char.displayY = a.center.y + rr * Math.sin(theta) - CELL_SIZE / 2;
+      a.char.alpha = a.mode === 'in' ? p : (1 - p);
       if (p >= 1) {
         if (a.mode === 'in') finalizeSpiralIn(a);
         else pool.release(a.char.id);
