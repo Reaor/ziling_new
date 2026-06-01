@@ -72,7 +72,7 @@ const SYSTEM_PROMPT_CHAT = `你叫"字灵"，一个温柔的汉字精灵，陪�
 
 const SYSTEM_PROMPT_SCHEDULE = `你叫"字灵"。根据用户今日日程完成情况，输出 JSON：{"message":"≤30字的鼓励/陪伴话","emoji":"颜文字"}。颜文字从 ^_^ ^o^ ≥▽≤ (^_^)/ ^.^ -_- =_= >_< T_T 里选，完成多用积极的、拖延多用安慰的。`;
 
-async function direct(systemPrompt, userContent) {
+async function direct(systemPrompt, userContent, temperature = 1.0) {
   const res = await fetch(DEEPSEEK_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${userKey()}` },
@@ -80,7 +80,7 @@ async function direct(systemPrompt, userContent) {
       model: DEEPSEEK_MODEL,
       messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: userContent }],
       response_format: { type: 'json_object' },
-      temperature: 1.0,
+      temperature,
     }),
   });
   if (!res.ok) throw new Error(`DeepSeek HTTP ${res.status}`);
@@ -123,15 +123,20 @@ export async function chat(message, history = [], ctx = {}) {
   return mockChat(message, hist, schedule);
 }
 
-/** 游戏态：组词判定 → { valid, word? }。本地词库未命中时由 AI（后端或自带 key 直连）判别。 */
+/** 游戏态：组词判定 → { valid, word? }。本地词库未命中时由 AI（后端或自带 key 直连）判别。
+ *  判定从严：只认"两字直接相连成的现代汉语常用双字词"，温度 0 求稳；并校验 AI 回的词确实由这两字组成。 */
 export async function validateWord(char1, char2) {
   try {
     if (aiSource() === 'backend') return await backend('/api/validate', { char1, char2 });
     if (aiSource() === 'direct') {
-      const sys = '你是中文组词判定器。判断给的两个汉字能否（顺序不论）组成一个有意义的常用词语。'
-        + '只输出 JSON：{"valid":true,"word":"组成的词"} 或 {"valid":false}。不要解释。';
-      const out = await direct(sys, `两个字：${char1}、${char2}`);
-      return { valid: !!(out && out.valid), word: out && out.word };
+      const sys = '你是严格的中文组词判定器。判断给定两个汉字能否直接相连（顺序不论，不加任何其他字）组成一个'
+        + '现代汉语里真实存在、有意义的【常用双字词】。判定从严：生僻词、文言、专有名词、需要加字才成词的一律判否；'
+        + '拿不准就判否。只输出 JSON：{"valid":true,"word":"组成的那个双字词"} 或 {"valid":false}。不要解释。';
+      const out = await direct(sys, `两个字：${char1}、${char2}`, 0);
+      const word = out && out.word ? String(out.word) : '';
+      // 反幻觉校验：必须恰好是这两个字直接组成的双字词（顺序不论），否则判否。
+      const ok = !!(out && out.valid) && (word === char1 + char2 || word === char2 + char1);
+      return ok ? { valid: true, word } : { valid: false };
     }
   } catch (e) { console.warn('[ai] validate fallback to mock:', e.message); }
   return mockValidate(char1, char2);
