@@ -28,6 +28,7 @@ import { ShapeSystem, EMOJI_TEMPLATES } from './core/shape.js';
 import { GestureRecognizer } from './input/gestures.js';
 import * as ai from './ai/bridge.js';
 import { buildSettings, loadSettings } from './ui/settings.js';
+import { WordMatch } from './game/wordmatch.js';
 
 const CELL_SIZE = 11;          // 网格分辨率：实心多排里字定形；格子适中→笔画有 2~3 排里字、复杂字也分得开
 const FONT_SIZE = 10;          // 里字字号：必须 ≤ CELL_SIZE(11) 才不溢出格子；留 1px 余白→相邻里字不糊、清爽不重叠
@@ -1002,6 +1003,22 @@ document.addEventListener('DOMContentLoaded', () => {
     console.log('Shape released → free wander');
   }
 
+  // ── 游戏态：文字消消乐（覆盖层；退出回互动态）──────────────────────────────
+  let gameInst = null;
+  function enterGame() {
+    if (gameInst) return;
+    // 暂停互动/对话/时钟/蛇/自动循环，画面交给游戏覆盖层。
+    stopInteractiveLoop(); exitConversation(); stopClock(); stopSnake();
+    inOrigin = false; originAnim = null; originHold = null; shapeActive = false;
+    const overlay = document.getElementById('ui-overlay');
+    const fontCss = loadSettings().font;
+    gameInst = new WordMatch(overlay, {
+      size: 8, fontCss,
+      onExit: () => { gameInst = null; formOriginText(lastOriginText || defaultOriginText); startInteractiveLoop(); },
+    });
+    gameInst.open();
+  }
+
   // ── 原态（文本行）↔ 动态（形状）────────────────────────────────────────
   // 原态 = 把现有里字按"正常文本行"居中排版钉住静止（带极轻微浮动增加生命感，收束 L28）。
   // 里字内容不变（动态里的里字本就来自原态文本）；动态↔原态都靠 PIBT 沿格子滑动，匀速美观
@@ -1255,7 +1272,7 @@ document.addEventListener('DOMContentLoaded', () => {
     gameBtn.title = '进入游戏态（本期未实现）';
     gameBtn.style.cssText = 'position:absolute;left:10px;top:10px;width:40px;height:40px;font-size:17px;' + PILL;
     gameBtn.addEventListener('pointerdown', stop); press(gameBtn);
-    gameBtn.addEventListener('click', e => { stop(e); toast('游戏态后续开放'); });
+    gameBtn.addEventListener('click', e => { stop(e); enterGame(); });
 
     // 左下：对话态入口（点击展开输入框 → 发送进入对话态三阶段；收起退出）。输入框宽度平滑展开。
     const convoWrap = document.createElement('div');
