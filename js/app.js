@@ -178,13 +178,14 @@ document.addEventListener('DOMContentLoaded', () => {
     { name: '蝴蝶',  cells: 120, make: n => shapes.sampleCurveOrdered('butterfly', gridCols, gridRows, n) },
     { name: '李萨如', cells: 110, make: n => shapes.sampleCurveOrdered('lissajous', gridCols, gridRows, n) },
     { name: '旋轮花', cells: 120, make: n => shapes.sampleCurveOrdered('spiro', gridCols, gridRows, n) },
-    // 静态形状（非巨字，里字钉位定形、不做形状自身动态）：
-    { name: '三角',  make: () => ({ mask: buildTriangleCells(), static: true }) },
-    { name: '六边形', make: () => ({ mask: buildHexagonCells(), static: true }) },
-    { name: '月牙',  make: () => ({ mask: buildCrescentCells(), static: true }) },
-    { name: '菱形',  make: () => ({ mask: buildDiamondCells(), static: true }) },
-    { name: '双环',  make: () => ({ mask: buildRingsCells(),   static: true }) },
-    { name: '箭头',  make: () => ({ mask: buildArrowCells(),   static: true }) },
+    // 几何形状：与颜文字/巨字同样走 strict 满填循环流动（里字沿格匀速华容道滑动）——
+    // 不再钉死静止（"里字会不动"观感差、也违背流畅宗旨），轮廓由满填里字勾勒、内部持续流动。
+    { name: '三角',  make: () => ({ mask: buildTriangleCells() }) },
+    { name: '六边形', make: () => ({ mask: buildHexagonCells() }) },
+    { name: '月牙',  make: () => ({ mask: buildCrescentCells() }) },
+    { name: '菱形',  make: () => ({ mask: buildDiamondCells() }) },
+    { name: '双环',  make: () => ({ mask: buildRingsCells() }) },
+    { name: '箭头',  make: () => ({ mask: buildArrowCells() }) },
     { name: '北京时间', clock: true },   // 即时时分秒：每秒重采样 HH/MM/SS 竖排 → 数字滚动
     // 进阶·动态曲线（里字匀速走格 + 形状自身周期性变化叠加）：
     { name: '正弦波', make: () => ({ mask: buildWaveCells(),   anim: 'wave' }) },
@@ -964,17 +965,18 @@ document.addEventListener('DOMContentLoaded', () => {
     convoActive = true;
     lastUserMsg = text;
     clearConvoTimers();
-    if (convoWaitId) clearInterval(convoWaitId);
+    if (convoWaitId) { clearTimeout(convoWaitId); convoWaitId = null; }
     if (megaRotTimer) { clearInterval(megaRotTimer); megaRotTimer = null; }
     if (!isResume) convoHistory.push({ role: 'user', content: text });
-    // 等待期：随机颜文字快速变化（收束 L22 AI 回复有延时，颜文字更活跃）。
-    const keys = Object.keys(EMOJI_TEMPLATES);
-    convoWaitId = setInterval(() => applyEmojiKey(keys[(Math.random() * keys.length) | 0]), 700);
-    applyEmojiKey(keys[(Math.random() * keys.length) | 0]);
+    // 等待期（收束 L22）：不再每 700ms 乱切形态（那会让字莫名闪现/消失、观感差）。改为——
+    //   仅当 AI 响应较慢(>450ms)时，平滑成型一个安定的"思考"颜文字并保持（其满填流动自带生命感），
+    //   答复到达即顺势过渡到 PHASE1。响应快则不闪这一下，直接给答复。全程只有有理有据的成型/过渡。
+    convoWaitId = setTimeout(() => { convoWaitId = null; if (convoActive) applyEmojiKey('-_-'); }, 450);
     let data;
     // 带上当前日程上下文 → AI 能基于用户本身的日程/完成情况给专业、个性化的回答。
     try { data = await ai.chat(text, convoHistory.slice(-8), { schedule: lastSchedule }); }
-    finally { clearInterval(convoWaitId); convoWaitId = null; }
+    finally { if (convoWaitId) { clearTimeout(convoWaitId); convoWaitId = null; } }
+    if (!convoActive) return;   // 期间被打断/退出 → 不再继续推进
     convoHistory.push({ role: 'assistant', content: data.quickReply || '' });
     runConvoPhases(data);
   }
@@ -1047,7 +1049,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   function exitConversation() {
     convoActive = false; clearConvoTimers();
-    if (convoWaitId) { clearInterval(convoWaitId); convoWaitId = null; }
+    if (convoWaitId) { clearTimeout(convoWaitId); convoWaitId = null; }
     if (megaRotTimer) { clearInterval(megaRotTimer); megaRotTimer = null; }
   }
 
