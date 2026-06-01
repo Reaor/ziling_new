@@ -55,11 +55,14 @@ node server.js
 | 形状掩码、点击散开、拖拽环绕、手势 | ✅ 已实现 |
 | 互动态：原态↔动态、丰富形态目录、长按回归、圆聚放大过渡 | ✅ 已实现 |
 | 对话态：三阶段 PHASE1/2/3 循环（接 AI/Mock） | ✅ 已实现 |
-| AI 通信 `js/ai/bridge.js` + Mock `js/ai/mock.js` | ✅ 已实现（生产待后端接） |
-| 宿主 App 日程桥接（setSchedule/postMessage/URL + /api/schedule） | ✅ 已实现 |
-| DOM UI | ⚠️ 当前为调试面板；正式三模态入口 UI 待做 |
-| 游戏态 | ❌ 后续（接口已占位） |
-| 字体 LXGW WenKai | ❌ 暂用系统字体 fallback |
+| AI 通信 `js/ai/bridge.js` + Mock + 人设/记忆 | ✅ 已实现（生产待后端接） |
+| 宿主 App 日程桥接 + 日程 AI 输出流 | ✅ 已实现 |
+| 游戏态 文字消消乐 `js/game/wordmatch.js`（本地词库即时 + AI 兜底） | ✅ 已实现 |
+| 设置页 `js/ui/settings.js`（外观/字体/字色/特效/原态字号/AI风格·记忆·Key） | ✅ 已实现 |
+| 开屏动画（电路线→^_^→wink）/ 去黑框 / 移动端双击修复 | ✅ 已实现 |
+| 入口按钮（🎮游戏 / 💬对话 / ⚙设置⇄🛠调试）+ 毛玻璃药丸风 | ✅ 已实现 |
+| 正式产品级 UI 排布 | ⚠️ 当前为调试/设置面板，便于后端取舍再设计 |
+| 字体 LXGW WenKai 内置 | ❌ 暂用系统字体 fallback |
 
 ---
 
