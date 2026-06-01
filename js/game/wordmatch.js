@@ -17,17 +17,23 @@
 
 import * as ai from '../ai/bridge.js';
 
-// 常用单字池（用于铺格子，偏向易组词的高频字）。
-const POOL = ('天明休息加油快乐学习工作朋友时间完成心想事成花开月圆风云山水日春秋冬'
-  + '人和气安宁知道理想美好生活努力进步成长温暖光亮希望未来梦语言文字').split('');
-
-// 本地双字词库（即时判定；未命中再问 AI）。可持续扩充。
-const WORDS = new Set([
-  '天明', '明天', '休息', '加油', '快乐', '学习', '工作', '朋友', '时间', '完成',
-  '花开', '月圆', '风云', '山水', '春秋', '人和', '安宁', '知道', '理想', '美好',
-  '生活', '努力', '进步', '成长', '温暖', '光亮', '希望', '未来', '梦想', '语言',
-  '文字', '心想', '想事', '事成', '日月', '春风', '秋月', '气和', '和气', '美满',
-]);
+// 本地双字词库（即时判定；未命中再问 AI 兜底）。覆盖大量高频常用词，让"正确的词"基本都能即时判对。
+// 顺序不论：判定时同时检查 ab 与 ba。
+const WORD_LIST = [
+  '明天', '今天', '昨天', '天空', '天气', '休息', '加油', '快乐', '开心', '学习',
+  '工作', '朋友', '时间', '完成', '努力', '进步', '成长', '希望', '未来', '梦想',
+  '语言', '文字', '心想', '理想', '美好', '生活', '温暖', '光明', '阳光', '微笑',
+  '花开', '月圆', '风云', '山水', '春风', '秋月', '冬雪', '夏日', '和气', '平安',
+  '安宁', '安心', '知道', '思考', '记忆', '青春', '勇敢', '坚持', '相信', '感谢',
+  '快慢', '高低', '大小', '上下', '左右', '前后', '内外', '东西', '南北', '黑白',
+  '日月', '水火', '冷暖', '甘苦', '悲喜', '聚散', '动静', '问答', '来往', '出入',
+  '朋辈', '同学', '老师', '父母', '家人', '孩子', '世界', '城市', '道路', '回家',
+  '吃饭', '喝水', '睡觉', '读书', '写字', '唱歌', '跳舞', '画画', '运动', '游戏',
+  '健康', '幸福', '自由', '宁静', '从容', '专注', '清醒', '放松', '充实', '丰盈',
+];
+const WORDS = new Set(WORD_LIST);
+// 单字池 = 词库里所有出现过的字（保证棋盘里的字大多能两两组成词，减少"凑不出"的挫败）。
+const POOL = [...new Set(WORD_LIST.join('').split(''))];
 
 export class WordMatch {
   /**
@@ -49,45 +55,54 @@ export class WordMatch {
   open() {
     const root = document.createElement('div');
     root.style.cssText = 'position:absolute;inset:0;display:flex;flex-direction:column;'
-      + 'align-items:center;justify-content:flex-start;gap:10px;padding:14px 8px;'
+      + 'align-items:center;justify-content:center;gap:14px;padding:18px 10px;'
       + 'background:var(--zl-bg);color:var(--zl-fg);box-sizing:border-box;z-index:5;';
     root.addEventListener('pointerdown', e => e.stopPropagation());
 
-    // 顶部：计分 + 退出
+    // 脉动等待 keyframes（作用域仅本覆盖层）。
+    const style = document.createElement('style');
+    style.textContent = '@keyframes zlpulse{0%,100%{transform:scale(1.0)}50%{transform:scale(1.14)}}';
+    root.append(style);
+
+    // 顶部：标题 + 计分胶囊 + 退出
     const top = document.createElement('div');
-    top.style.cssText = 'width:100%;max-width:420px;display:flex;justify-content:space-between;align-items:center;';
+    top.style.cssText = 'width:100%;max-width:420px;display:flex;justify-content:space-between;align-items:center;gap:8px;';
+    const title = document.createElement('div');
+    title.textContent = '字 · 消'; title.style.cssText = 'font-size:17px;font-weight:600;letter-spacing:3px;opacity:0.9;';
     this.scoreEl = document.createElement('div');
-    this.scoreEl.style.cssText = 'font-size:18px;font-weight:600;letter-spacing:1px;';
+    this.scoreEl.style.cssText = 'flex:1;text-align:center;font-size:15px;font-weight:600;letter-spacing:1px;'
+      + 'padding:6px 0;border-radius:11px;background:rgba(127,127,127,0.12);';
     this._renderScore();
     const exit = document.createElement('button');
-    exit.textContent = '退出 ✕';
-    exit.style.cssText = pill();
+    exit.textContent = '✕';
+    exit.style.cssText = pill() + 'width:36px;height:36px;padding:0;font-size:15px;';
     exit.addEventListener('pointerdown', e => e.stopPropagation());
     exit.addEventListener('click', () => this.close());
-    top.append(this.scoreEl, exit);
+    top.append(title, this.scoreEl, exit);
     root.append(top);
 
-    // 棋盘
+    // 棋盘（带柔和外框、毛玻璃底）
     const board = document.createElement('div');
     const n = this.size;
-    board.style.cssText = `display:grid;grid-template-columns:repeat(${n},1fr);gap:4px;`
-      + 'width:min(92vw,420px);aspect-ratio:1;';
+    board.style.cssText = `display:grid;grid-template-columns:repeat(${n},1fr);gap:5px;`
+      + 'width:min(92vw,420px);aspect-ratio:1;padding:8px;border-radius:16px;'
+      + 'background:rgba(127,127,127,0.08);box-shadow:0 6px 24px rgba(0,0,0,0.18);';
     this.board = board;
     for (let i = 0; i < n * n; i++) {
       const cell = document.createElement('div');
-      cell.style.cssText = this._cellCss();
       const ch = this._randChar();
       cell.textContent = ch;
       cell.addEventListener('pointerdown', e => e.stopPropagation());
       cell.addEventListener('click', () => this._tap(i));
       this.cells[i] = { ch, el: cell };
+      cell.style.cssText = this._cellCss(false);
       board.append(cell);
     }
     root.append(board);
 
     const hint = document.createElement('div');
-    hint.style.cssText = 'font-size:12px;opacity:0.6;';
-    hint.textContent = '点两个能组成词的字消除它们';
+    hint.style.cssText = 'font-size:12px;opacity:0.55;';
+    hint.textContent = '点两个能组成词的字即可消除（顺序不论·再点取消）';
     root.append(hint);
 
     this.mount.append(root);
@@ -112,35 +127,48 @@ export class WordMatch {
   _renderScore() { this.scoreEl.textContent = `得分 ${this.score}`; }
 
   _tap(i) {
-    if (this.busy) return;
+    if (this.busy) return;                       // 判定中（等 AI）不接受新点击
     const cur = this.cells[i];
     if (!cur || cur.removing) return;
-    if (this.sel && this.sel.i === i) { this._deselect(); return; } // 再点同一个 → 取消
-    if (!this.sel) { this._select(i); return; }
+    // 再次单击已激活的字 → 解除该字激活。
+    if (this.sel === i) { this._setActive(i, false); this.sel = null; return; }
+    // 还没有激活的字 → 激活当前。
+    if (this.sel == null) { this.sel = i; this._setActive(i, true); return; }
 
-    // 已有选中 → 判定这两个字能否组词
-    const a = this.cells[this.sel.i].ch, b = cur.ch;
-    const local = WORDS.has(a + b) || WORDS.has(b + a);
-    if (local) { this._clearPair(this.sel.i, i, (a + b)); this.sel = null; return; }
-
-    // 本地未命中 → 问 AI（等待期被点两字"脉动"缓解延时）。
-    const i1 = this.sel.i, i2 = i;
-    this._pulse(i1, true); this._pulse(i2, true); this.busy = true;
-    ai.validateWord(a, b).then(res => {
-      this.busy = false; this._pulse(i1, false); this._pulse(i2, false);
-      if (res && res.valid) this._clearPair(i1, i2, res.word || (a + b));
-      else { this._shake(i1); this._shake(i2); this._deselect(); }
-    }).catch(() => { this.busy = false; this._pulse(i1, false); this._pulse(i2, false); this._shake(i2); this._deselect(); });
+    // 已有一个激活字 + 点了另一个 → 判定这两个字能否组词（顺序不论）。
+    const i1 = this.sel, i2 = i;
+    const a = this.cells[i1].ch, b = this.cells[i2].ch;
+    this._setActive(i2, true);                   // 第二个也高亮，明确"正在判定这两个"
+    if (WORDS.has(a + b) || WORDS.has(b + a)) {   // 本地命中 → 即时判对
+      this.sel = null;
+      this._clearPair(i1, i2, WORDS.has(a + b) ? a + b : b + a);
+      return;
+    }
+    // 本地未命中 → 问 AI 兜底（等待期两字脉动缓解延时）。无论判对判错，结束都清除两字激活。
+    this.busy = true; this.sel = null;
+    this._pulse(i1, true); this._pulse(i2, true);
+    const done = (ok, word) => {
+      this.busy = false;
+      this._pulse(i1, false); this._pulse(i2, false);
+      if (ok) { this._clearPair(i1, i2, word); }
+      else { this._shake(i1); this._shake(i2); this._setActive(i1, false); this._setActive(i2, false); }
+    };
+    ai.validateWord(a, b)
+      .then(res => done(!!(res && res.valid), (res && res.word) || (a + b)))
+      .catch(() => done(false));
   }
 
-  _select(i) { this.sel = { i }; this.cells[i].el.style.cssText = this._cellCss(true); }
-  _deselect() { if (this.sel) { this.cells[this.sel.i].el.style.cssText = this._cellCss(false); this.sel = null; } }
-
+  // 设置/取消某格的"激活"高亮（不带脉动）。
+  _setActive(i, on) {
+    const c = this.cells[i]; if (!c) return;
+    c.active = on; c.pulsing = false;
+    c.el.style.cssText = this._cellCss(on);
+  }
+  // 脉动等待态（仅判定期间）。结束时由 _setActive(false) 或 _clearPair 收尾。
   _pulse(i, on) {
-    const el = this.cells[i].el;
-    el.style.animation = on ? 'zlpulse 0.7s ease-in-out infinite' : '';
-    if (on) el.style.cssText = this._cellCss(true) + 'animation:zlpulse .7s ease-in-out infinite;';
-    else el.style.cssText = this._cellCss(true);
+    const c = this.cells[i]; if (!c) return;
+    c.pulsing = on;
+    c.el.style.cssText = this._cellCss(true) + (on ? 'animation:zlpulse .7s ease-in-out infinite;' : '');
   }
   _shake(i) {
     const el = this.cells[i].el;
@@ -151,9 +179,9 @@ export class WordMatch {
   _clearPair(i1, i2, word) {
     this.score += 10 + (word ? word.length * 2 : 0);
     this._renderScore();
-    [i1, i2].forEach(i => this._inkBurst(i));
+    [i1, i2].forEach(i => { this.cells[i].active = false; this.cells[i].pulsing = false; this._inkBurst(i); });
     setTimeout(() => { this._refill(i1); this._refill(i2); }, 360);
-    this._deselect();
+    this.sel = null;
   }
 
   // 墨色溢出：格内一团墨迅速涨满并淡出，字消失。

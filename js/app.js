@@ -357,8 +357,20 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (transit.length === 0 && reformPending) {
       reformPending = false;
-      reformShape();
+      if (inOrigin && !originAnim) relayoutOrigin();  // 原态：螺旋增减完成 → 含新字重排文本行
+      else reformShape();
     }
+  }
+
+  // 原态里字数变化后，按当前文本重排文本行（不走"圆聚"大过渡，直接钉到放大文本位，平滑就位）。
+  function relayoutOrigin() {
+    const text = lastOriginText || defaultOriginText;
+    const content = [...String(text)].filter(ch => ch.trim().length > 0);
+    const alive = aliveChars();
+    if (alive.length === 0) return;
+    const L = originPixelLayout(alive.length);
+    alive.forEach((c, i) => { c.char = content[i % content.length]; });
+    originHold = { chars: alive.map((c, i) => ({ c, idx: i })), layout: L.pos };
   }
 
   // 螺旋飞入到点 → 落进字形最近空格、注册进引擎，待批次结束并入流动。
@@ -880,7 +892,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }).catch(() => { convoActive = false; interactiveTimer = setTimeout(tick, 6000); });
       } else {
         applyShape(shapeIndex + 1 + ((Math.random() * 3) | 0)); // 随机往后跳 1~3 个形状
-        interactiveTimer = setTimeout(tick, 7000 + Math.random() * 4000);
+        interactiveTimer = setTimeout(tick, 9500 + Math.random() * 5000); // 复杂形状成型后充分停留
       }
     };
     interactiveTimer = setTimeout(tick, 6000);
@@ -922,9 +934,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // 呈现停留时长：原态文本/颜文字/巨字各自"成型后再多停留一会儿"才切换（避免没成型就消失）。
   // 原态过渡本身约 ORIGIN_MS(2.2s)；颜文字/巨字满填流动需约 1.6s 成型 → 留足 settle + 阅读时间。
-  const DWELL_ORIGIN = ORIGIN_MS + 2400;   // 原态：过渡(2.2s)+阅读(2.4s)
-  const DWELL_EMOJI = 5200;                 // 颜文字：成型(~1.6s)+充分停留观赏（用户要求更久）
-  const DWELL_MEGA = 5200;                  // 巨字：成型 + 充分停留（含轮播时还会更久，见 presentMegachar）
+  const DWELL_ORIGIN = ORIGIN_MS + 3000;   // 原态：过渡(2.2s)+阅读(3.0s)
+  const DWELL_EMOJI = 6500;                 // 颜文字：成型(~1.6s)+充分停留观赏
+  const DWELL_MEGA = 7000;                  // 巨字/复杂形状：成型(可达 2s)+充分停留再切（用户要求更久）
 
   // PHASE1 原态简洁回复 → PHASE2 巨字 → PHASE3 回复流(text 原态 ↔ emoji/巨字 循环)。
   function runConvoPhases(data) {
@@ -1026,35 +1038,30 @@ document.addEventListener('DOMContentLoaded', () => {
   // 里字内容不变（动态里的里字本就来自原态文本）；动态↔原态都靠 PIBT 沿格子滑动，匀速美观
   // （华容道式，收束 L4/L29）。长按动态→原态；原态里点/双击/拖动→回到动态形状。
 
-  // 动态 → 原态：先按目标文本调整里字数/内容，再启动"旋转圆→逐个放大飞入文本行"的过渡。
+  // 动态 → 原态：里字数变化用**螺旋出入场**（多余的螺旋淡出、缺的螺旋淡入），与"圆聚→放大文本行"
+  // 过渡同时进行 → 不再有里字突兀消失/出现。过渡只作用于"留下来的"那批里字。
   function enterOrigin() {
     if (inOrigin || originAnim) return;
     if (aliveIds().length === 0) return;
     stopClock(); stopSnake(); currentAnim = null; animDirty = true; flushTransit();
     clearTimeout(scatterTimer);
     if (motion.isOrbiting()) motion.endOrbit();
-    // 内容/长度自适应：去掉动态多出的里字、补回缺的，呈现"原本那段话"。
     const text = lastOriginText || defaultOriginText;
     const content = [...String(text)].filter(ch => ch.trim().length > 0);
-    syncCharCountInstant(content.length);
+    const n = content.length;
+    const L = originPixelLayout(n);
+    const maskCells = L.pos.map(p => ({ x: Math.round(p.x / CELL_SIZE), y: Math.round(p.y / CELL_SIZE) }));
+    // 里字数 → n：多了螺旋淡出、少了螺旋淡入（与过渡并行）。淡入的字在 finalize 后随下一轮归位。
+    const cur = aliveChars().length;
+    if (cur > n) despawnSpiralOut(cur - n, maskCells);
+    else if (cur < n) spawnSpiralIn(n - cur, maskCells);
+    // 用"当前已在册（不含正螺旋过渡）"的里字走文本过渡；内容按文本顺序赋上。
     const alive = aliveChars();
     alive.forEach((c, i) => { c.char = content[i % content.length]; });
-    motion.releaseShape();         // 脱离引擎约束，过渡由显示层接管
+    motion.releaseShape();
     startOriginTransition('toOrigin', alive);
     inOrigin = true; shapeActive = false;
-    console.log(`→ 原态「${text}」(${alive.length} 里字)`);
-  }
-
-  // 即时把在册里字数调到 n（过渡用，不走螺旋；多删少补，补的在中心附近、alpha=1）。
-  function syncCharCountInstant(n) {
-    let alive = aliveChars();
-    while (alive.length > n) { const c = alive.pop(); motion.unregisterCharacter(c.id); pool.release(c.id); }
-    const cx = Math.floor(gridCols / 2), cy = Math.floor(gridRows / 2);
-    let k = 0;
-    while (aliveChars().length < n) {
-      const c = pool.acquire('字', (cx + k % 5) % gridCols, (cy + ((k / 5) | 0)) % gridRows);
-      c.alpha = 1; c.animA = 1; motion.registerCharacter(c); k++;
-    }
+    console.log(`→ 原态「${text}」(${alive.length}/${n} 里字，螺旋增减中)`);
   }
 
   // 把 n 个里字分配到同心方环（外环容量大）：返回 [{ring,k,n}]，与拖动环绕同构。
