@@ -41,7 +41,8 @@ const SCATTER_RESTORE_MS = 2500;
 const SPIRAL_ARMS = 4;         // 几条螺旋臂（均匀分布的几个方向）
 const SPIRAL_MS = 950;         // 单个里字飞入/飞出时长
 const SPIRAL_STAGGER_MS = 70;  // 同臂相邻里字的出发间隔（形成"一个接一个"队列）
-const SPIRAL_TURNS = 0.7;      // 螺旋缠绕圈数
+const SPIRAL_TURNS = 0.7;      // 螺旋缠绕圈数（入场）
+const SPIRAL_TURNS_OUT = 0.32; // 退场螺旋缠绕圈数（更小 → 焦点端正、不大幅卷过正在成形的区块）
 const INITIAL_CHARS = 56;      // 首屏播种数（之后随形状自适应增减）
 const MIN_CHARS = 28;
 const MAX_CHARS = 340;   // 高分辨率 + 粗笔画填满字身需要较多里字（复杂字如"爱"≈300+）
@@ -305,19 +306,29 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // 减字：挑离中心最远的里字，沿螺旋臂向外淡出后回收。
+  // 焦点端正且在区块外：rIn 放到“正在成形区块”外接圈之外（不与正在形成的原态重叠）；
+  // 四条螺旋臂的“亮端”（rIn 处，里字最显眼、聚成黑点）正落在四个对角方向（端正对称在区块四角外）；
+  // 每个里字归到离它当前方向最近的那条臂 → 就近入臂、位移最小，不会横跨区块乱跳。
   function despawnSpiralOut(count, mask) {
     const center = shapeCenterPx(mask);
-    const rIn = Math.max(CELL_SIZE * 2, shapeRadiusPx(mask, center) * 0.5);
-    const rOut = rIn + CELL_SIZE * 9;
+    const rIn = shapeRadiusPx(mask, center) + CELL_SIZE * 3;   // 焦点在区块外接圈外
+    const rOut = rIn + CELL_SIZE * 7;
+    const FOCAL = [Math.PI / 4, 3 * Math.PI / 4, 5 * Math.PI / 4, 7 * Math.PI / 4]; // 四角（端正）
+    const angDiff = (a, b) => Math.abs(Math.atan2(Math.sin(a - b), Math.cos(a - b)));
+    const armRank = [0, 0, 0, 0];   // 每条臂各自错峰计数（保持“一个接一个”）
     const victims = aliveChars()
       .map(c => ({ c, d: (c.displayX - center.x) ** 2 + (c.displayY - center.y) ** 2 }))
       .sort((a, b) => b.d - a.d).slice(0, count).map(o => o.c);
-    victims.forEach((c, k) => {
-      const arm = k % SPIRAL_ARMS, rank = Math.floor(k / SPIRAL_ARMS);
+    victims.forEach((c) => {
+      const ang = Math.atan2((c.displayY + CELL_SIZE / 2) - center.y, (c.displayX + CELL_SIZE / 2) - center.x);
+      let arm = 0, best = Infinity;
+      for (let i = 0; i < FOCAL.length; i++) { const d = angDiff(ang, FOCAL[i]); if (d < best) { best = d; arm = i; } }
+      const rank = armRank[arm]++;
       transitIds.add(c.id);
       motion.unregisterCharacter(c.id); // 退出 PIBT，腾出格子
-      transit.push({ char: c, mode: 'out', center, rIn, rOut, mask,
-        base: (arm / SPIRAL_ARMS) * Math.PI * 2,
+      // base 取“亮端(rIn,缠绕因子=1)恰好落在对角焦点方向”：base = 焦点角 − 缠绕量。
+      transit.push({ char: c, mode: 'out', center, rIn, rOut, mask, turns: SPIRAL_TURNS_OUT,
+        base: FOCAL[arm] - SPIRAL_TURNS_OUT * Math.PI * 2,
         elapsed: -rank * SPIRAL_STAGGER_MS, dur: SPIRAL_MS });
     });
     if (victims.length) reformPending = true;
@@ -360,7 +371,8 @@ document.addEventListener('DOMContentLoaded', () => {
       const rr = a.mode === 'in'
         ? a.rOut + (a.rIn - a.rOut) * ease(p)
         : a.rIn + (a.rOut - a.rIn) * ease(p);
-      const theta = a.base + SPIRAL_TURNS * Math.PI * 2 * (1 - (rr - a.rIn) / (a.rOut - a.rIn));
+      const turns = a.turns != null ? a.turns : SPIRAL_TURNS;   // 入场用 SPIRAL_TURNS；退场用更小的 turns
+      const theta = a.base + turns * Math.PI * 2 * (1 - (rr - a.rIn) / (a.rOut - a.rIn));
       a.char.displayX = a.center.x + rr * Math.cos(theta) - CELL_SIZE / 2;
       a.char.displayY = a.center.y + rr * Math.sin(theta) - CELL_SIZE / 2;
       a.char.alpha = a.mode === 'in' ? p : (1 - p);
