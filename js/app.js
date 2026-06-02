@@ -1077,6 +1077,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   function exitConversation() {
     convoActive = false; convoAuto = false; clearConvoTimers();
+    if (convoHistory.length > 40) convoHistory = convoHistory.slice(-40);   // 防长会话历史无限增长
     clearTimeout(schedToLoopTimer);   // 取消日程几轮/主动回应的自动推进
     if (convoWaitId) { clearTimeout(convoWaitId); convoWaitId = null; }
     if (megaRotTimer) { clearInterval(megaRotTimer); megaRotTimer = null; }

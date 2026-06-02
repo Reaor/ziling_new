@@ -70,9 +70,9 @@ node server.js
 
 ## 技术栈
 
-- **渲染**：Canvas 2D，`fillText` 逐字绘制
+- **渲染**：Canvas 2D；每个里字**预渲染成位图缓存、用 `drawImage` 绘制**（数百里字仍流畅，比逐帧 `fillText` 快 5~10×）
 - **语言**：Vanilla JS ES6+ Module，零 npm 运行时依赖
-- **视口**：390×700 逻辑像素，16px 格子
+- **视口**：自适应铺满 WebView（`100vw×100dvh`，最大宽 480px）；格子 `CELL_SIZE=11px`、里字 `FONT_SIZE=10px`，网格列数/行数按视口动态计算
 - **嵌入**：iOS / Android / 跨平台 App WebView
 - **AI**：DeepSeek（开发期经 `server.js` 代理；上线由 App 后端或宿主提供等价 API）
 
@@ -82,19 +82,23 @@ node server.js
 
 ```
 ├── index.html              # Canvas + ui-overlay 骨架
-├── css/app.css
+├── css/app.css             # 主题变量(--zl-bg/--zl-fg)、铺满视口、深浅色
 ├── js/
-│   ├── app.js              # 主入口（当前为运动引擎 demo）
-│   ├── core/               # grid, character, motion(PIBT), shape
-│   ├── render/renderer.js
-│   ├── input/gestures.js
-│   ├── ai/bridge.example.js   # AI 通信模板（待实现 bridge.js）
-│   ├── modes/              # （待建）interactive / conversation / game
-│   └── ui/                 # （待建）overlay
+│   ├── app.js              # 主入口与总控（三模态、原态↔动态、开屏、渲染循环、手势接线）
+│   ├── core/               # grid, character, motion(PIBT 引擎), shape(掩码/曲线/颜文字采样)
+│   ├── render/renderer.js  # Canvas 初始化 + DPR
+│   ├── input/gestures.js   # 点/双击/长按/拖动识别
+│   ├── ai/bridge.js        # AI 通信层（后端网关 / 自带key直连 / Mock 三态自动切换）
+│   ├── ai/mock.js          # 无后端/无密钥时的高质量假数据
+│   ├── ai/bridge.example.js   # 历史最小模板（仅供参考；实际用 bridge.js）
+│   ├── game/wordmatch.js   # 游戏态·文字消消乐
+│   └── ui/settings.js      # 设置页（外观/字体/字色/特效/原态字号/AI风格·记忆·Key）
 ├── tests/engine-behavior.mjs
 ├── server.example.js       # 本地开发服 + /api/chat 代理（复制为 server.js 使用）
 └── docs…                   # 见上表
 ```
+> 三个模态（互动态/对话态/游戏态）目前内聚在 `app.js` 总控里，游戏态与设置页已拆到独立模块；
+> 并非按早期设想的 `js/modes/*` 分文件——逻辑等价，集成时以本结构为准。
 
 ---
 
