@@ -875,27 +875,49 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.ZILING_CONFIG && window.ZILING_CONFIG.schedule) window.setSchedule(window.ZILING_CONFIG.schedule);
   }
 
-  // 日程态：先走一段"AI 输出流"传递日程信息（据完成情况鼓励/激励/安慰 + 巨字/颜文字），
-  // 随后并入互动态随机形状，但时不时再冒出一条 AI 回复（趣味性）。复用对话态三阶段机制。
+  // 日程态：最初呈现日程后，让 AI 据日程**分几轮娓娓道来**（每轮带上一轮上下文、连贯递进），
+  // 末轮走完整三阶段，再并入互动态。复用对话态机制。
+  // convoGen：每发起一次新"意图"(用户发送/主动回应/日程轮)就 +1，异步回来核对 → 杜绝竞态串台。
+  // convoAuto：当前对话是否"AI 主动播报"(日程/主动回应)；被用户操作打断时干净结束、回互动态。
+  let convoGen = 0, convoAuto = false;
   function scheduleSummary(sch) {
     const d = (sch.completed || []).length, p = (sch.pending || []).length, l = (sch.delayed || []).length;
     return `今天的日程：已完成${d}件、待办${p}件、拖延${l}件。请据此鼓励或安慰我。`;
   }
   async function runScheduleStream(sch) {
     exitConversation();
-    // 把日程当作一次"对话"输入：AI/Mock 给 quickReply+megachar+stream，走三阶段。
-    // 用 schedule 接口拿 emoji+message 作为兜底，用 chat 接口拿更丰富的流。
-    try {
-      const conv = await ai.chat(scheduleSummary(sch), []);
-      convoActive = true;
-      runConvoPhases(conv);
-      // 一段时间后并入互动态随机形状（仍会偶发 AI 回复 → startInteractiveLoop 负责）。
-      clearTimeout(schedToLoopTimer);
-      schedToLoopTimer = setTimeout(() => { exitConversation(); startInteractiveLoop(); }, 22000);
-    } catch (e) {
-      console.warn('runScheduleStream:', e);
-      startInteractiveLoop();
-    }
+    convoActive = true; convoAuto = true;
+    convoHistory = [];   // 日程播报 = 一轮新对话的开端
+    // 几轮回复：1) 温暖总览 → 2) 针对日程的一条具体建议 → 3) 收尾打气（末轮走三阶段后并入互动态）。
+    const rounds = [
+      scheduleSummary(sch) + '先给我一句温暖的总览。',
+      '顺着上一句，针对我的日程，建议我现在最该先做的一件事，并简要说明原因。',
+      '最后给我一句简短的打气话收尾。',
+    ];
+    const runRound = (r) => {
+      if (!convoActive || !convoAuto) return;            // 被用户打断 → 不再推进
+      if (r >= rounds.length) { exitConversation(); startInteractiveLoop(); return; }
+      const gen = ++convoGen;
+      ai.chat(rounds[r], convoHistory.slice(-8), { schedule: sch }).then(conv => {
+        if (gen !== convoGen || !convoActive || !convoAuto) return;
+        convoHistory.push({ role: 'user', content: rounds[r] });
+        convoHistory.push({ role: 'assistant', content: conv.quickReply || '' });
+        clearTimeout(schedToLoopTimer);
+        if (r < rounds.length - 1) {
+          // 中间轮：只把这句话以原态从容呈现，停留后进下一轮。
+          formOriginText(conv.quickReply || '');
+          schedToLoopTimer = setTimeout(() => runRound(r + 1), DWELL_ORIGIN + 2200);
+        } else {
+          // 末轮：走完整三阶段（巨字 + 回复流），再并入互动态自动循环。
+          runConvoPhases(conv);
+          schedToLoopTimer = setTimeout(() => { exitConversation(); startInteractiveLoop(); }, 24000);
+        }
+      }).catch(e => {
+        console.warn('runScheduleStream:', e);
+        if (convoActive) { exitConversation(); startInteractiveLoop(); }
+      });
+    };
+    runRound(0);
   }
   let schedToLoopTimer = null;
 
@@ -908,11 +930,13 @@ document.addEventListener('DOMContentLoaded', () => {
       if (intro.active || originAnim || motion.isOrbiting() || convoActive) { interactiveTimer = setTimeout(tick, 4000); return; }
       if (Math.random() < 0.22) {
         // 偶发 AI 小回复：基于日程再聊一句，走三阶段（结束后回到循环）。
-        convoActive = true;
-        ai.chat(lastSchedule ? scheduleSummary(lastSchedule) : '随便聊一句鼓励我的话', []).then(conv => {
+        convoActive = true; convoAuto = true;
+        const gen = ++convoGen;
+        ai.chat(lastSchedule ? scheduleSummary(lastSchedule) : '随便聊一句鼓励我的话', convoHistory.slice(-8), { schedule: lastSchedule }).then(conv => {
+          if (gen !== convoGen || !convoActive) return;
           runConvoPhases(conv);
           interactiveTimer = setTimeout(() => { exitConversation(); tick(); }, 16000);
-        }).catch(() => { convoActive = false; interactiveTimer = setTimeout(tick, 6000); });
+        }).catch(() => { convoActive = false; convoAuto = false; interactiveTimer = setTimeout(tick, 6000); });
       } else {
         applyShape(randomShapeIndex());                            // 真随机选下一个形态（不与当前重复）
         interactiveTimer = setTimeout(tick, 13000 + Math.random() * 7000); // 互动态切换更从容，不变太快
@@ -927,8 +951,10 @@ document.addEventListener('DOMContentLoaded', () => {
   function clearConvoTimers() { convoTimers.forEach(clearTimeout); convoTimers = []; }
   function convoLater(fn, ms) { const id = setTimeout(fn, ms); convoTimers.push(id); return id; }
   // 对话态中用户交互 → 暂停"自动推进"的定时器（但不退出对话态，双击可恢复/打断重答）。
+  // 若当前是 AI 主动播报（日程几轮/主动回应），用户一操作就**干净结束**它、回到互动态（含空闲循环与主动性）。
   function pauseConvoAuto() {
     if (!convoActive) return;
+    if (convoAuto) { exitConversation(); startInteractiveLoop(); return; }
     clearConvoTimers();
     if (megaRotTimer) { clearInterval(megaRotTimer); megaRotTimer = null; }
   }
@@ -938,9 +964,11 @@ document.addEventListener('DOMContentLoaded', () => {
   async function sendConversation(text, isResume) {
     if (!text) return;
     stopInteractiveLoop();   // 进入对话 → 停掉互动态自动循环
-    convoActive = true;
+    convoActive = true; convoAuto = false;   // 用户主动对话（非 AI 播报）
     lastUserMsg = text;
     clearConvoTimers();
+    clearTimeout(schedToLoopTimer);   // 取消可能在进行的日程几轮/主动回应自动推进
+    const gen = ++convoGen;
     if (convoWaitId) { clearTimeout(convoWaitId); convoWaitId = null; }
     if (megaRotTimer) { clearInterval(megaRotTimer); megaRotTimer = null; }
     if (!isResume) convoHistory.push({ role: 'user', content: text });
@@ -952,16 +980,40 @@ document.addEventListener('DOMContentLoaded', () => {
     // 带上当前日程上下文 → AI 能基于用户本身的日程/完成情况给专业、个性化的回答。
     try { data = await ai.chat(text, convoHistory.slice(-8), { schedule: lastSchedule }); }
     finally { if (convoWaitId) { clearTimeout(convoWaitId); convoWaitId = null; } }
-    if (!convoActive) return;   // 期间被打断/退出 → 不再继续推进
+    if (gen !== convoGen || !convoActive) return;   // 期间被新意图/退出打断 → 不再继续推进
     convoHistory.push({ role: 'assistant', content: data.quickReply || '' });
     runConvoPhases(data);
   }
 
+  // ── 互动态主动性：用户做了几次操作后，AI 主动冒出一条应景回应（不必干等空闲循环）──────────
+  let interactOps = 0;
+  const PROACTIVE_OPS = 4;   // 累计几次用户操作 → 触发一次主动回应
+  function noteInteraction() {
+    if (convoActive || gameInst || intro.active) return;   // 对话/游戏/开屏中不计数
+    if (++interactOps >= PROACTIVE_OPS) { interactOps = 0; proactiveReply(); }
+  }
+  function proactiveReply() {
+    if (convoActive || gameInst || intro.active) return;
+    stopInteractiveLoop();
+    convoActive = true; convoAuto = true;
+    const gen = ++convoGen;
+    const prompt = lastSchedule
+      ? scheduleSummary(lastSchedule) + '我刚在和你互动玩，主动跟我说句应景、贴合我日程的话。'
+      : '我刚在和你互动玩，主动跟我说句应景、温暖鼓励的话。';
+    ai.chat(prompt, convoHistory.slice(-8), { schedule: lastSchedule }).then(conv => {
+      if (gen !== convoGen || !convoActive) return;
+      convoHistory.push({ role: 'assistant', content: conv.quickReply || '' });
+      runConvoPhases(conv);
+      clearTimeout(schedToLoopTimer);
+      schedToLoopTimer = setTimeout(() => { exitConversation(); startInteractiveLoop(); }, 22000);
+    }).catch(() => { if (convoActive) { convoActive = false; convoAuto = false; startInteractiveLoop(); } });
+  }
+
   // 呈现停留时长：原态文本/颜文字/巨字各自"成型后再多停留一会儿"才切换（避免没成型就消失）。
-  // 原态过渡本身约 ORIGIN_MS(2.2s)；颜文字/巨字满填流动需约 1.6s 成型 → 留足 settle + 阅读时间。
-  const DWELL_ORIGIN = ORIGIN_MS + 3800;   // 原态：过渡(2.2s)+阅读(3.8s)
-  const DWELL_EMOJI = 8500;                 // 颜文字：成型 + 充分停留观赏（进一步拉长）
-  const DWELL_MEGA = 9000;                  // 巨字/复杂形状：成型(可达 2s)+长停留再切
+  // 原态过渡本身约 ORIGIN_MS(2.2s)；原态停留特意拉长 → 用户来得及读、来得及思考，不被催着走。
+  const DWELL_ORIGIN = ORIGIN_MS + 5400;   // 原态：过渡(2.2s)+阅读思考(5.4s)，比以前更从容
+  const DWELL_EMOJI = 9500;                 // 颜文字：成型 + 充分停留观赏（再拉长）
+  const DWELL_MEGA = 10000;                 // 巨字/复杂形状：成型(可达 2s)+长停留再切
 
   // PHASE1 原态简洁回复 → PHASE2 巨字 → PHASE3 回复流(text 原态 ↔ emoji/巨字 循环)。
   function runConvoPhases(data) {
@@ -1024,7 +1076,8 @@ document.addEventListener('DOMContentLoaded', () => {
     return interval * groups.length + 600;                        // 轮播总时长
   }
   function exitConversation() {
-    convoActive = false; clearConvoTimers();
+    convoActive = false; convoAuto = false; clearConvoTimers();
+    clearTimeout(schedToLoopTimer);   // 取消日程几轮/主动回应的自动推进
     if (convoWaitId) { clearTimeout(convoWaitId); convoWaitId = null; }
     if (megaRotTimer) { clearInterval(megaRotTimer); megaRotTimer = null; }
   }
@@ -1570,6 +1623,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         scatterTimer = setTimeout(reformShape, SCATTER_RESTORE_MS);
       }
+      noteInteraction();   // 累计用户操作 → 够几次后 AI 主动回应
     },
 
     onDoubleTap() {
@@ -1578,10 +1632,12 @@ document.addEventListener('DOMContentLoaded', () => {
       stopInteractiveLoop();
       clearTimeout(scatterTimer);   // 取消前一下 onTap 可能挂起的散开/归位，避免与切形状打架
       triggerMicro();
-      // 对话态中双击 = 打断回复流、从被打断处重新展开（收束 L22）。
-      if (convoActive && lastUserMsg) { resumeConvo(); return; }
-      if (inOrigin || originHold) { enterShape(false); return; } // 原态→动态（回到当前形状）
+      // 用户对话态中双击 = 打断回复流、从被打断处重新展开（收束 L22）。
+      if (convoActive && !convoAuto && lastUserMsg) { resumeConvo(); return; }
+      if (convoAuto) { exitConversation(); startInteractiveLoop(); }   // AI 主动播报中双击 → 结束播报、转互动
+      if (inOrigin || originHold) { enterShape(false); noteInteraction(); return; } // 原态→动态（回到当前形状）
       applyShape(randomShapeIndex());               // 动态→随机切一个形态
+      noteInteraction();
     },
 
     onLongPress() {
@@ -1590,6 +1646,7 @@ document.addEventListener('DOMContentLoaded', () => {
       stopInteractiveLoop(); pauseConvoAuto();   // 对话态长按 → 回归原态（同互动态）
       if (inOrigin || originHold || originAnim) return;
       enterOrigin();
+      noteInteraction();
     },
 
     // 拖动（收束 L30）：里字聚成方形，按同心方环逐层旋转、越拖越快；中心=手指、
@@ -1617,6 +1674,7 @@ document.addEventListener('DOMContentLoaded', () => {
       dragging = false;
       motion.endOrbit();
       if (dragEnd) reformAt(dragEnd.col, dragEnd.row); // 落点还原形状
+      noteInteraction();
     },
   });
 
