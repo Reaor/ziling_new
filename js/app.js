@@ -1356,6 +1356,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // 初次进入先呈现原态文本行（收束 L5；内容/长度自适应，后续由 AI 回答驱动）。
   // 首屏呈现由开屏动画结束后的 startAfterIntro() 负责（见 drawIntro）。
 
+  // ── 宿主嵌入模式（App 内 iframe，?embed=1）──────────────────────────────
+  // 仅影响"壳"：入口按钮样式与位置、不再内建设置/调试面板（已融入宿主 App 设置页）、
+  // 配色跟随宿主调色板。精灵本体（运动/形态/三模态/AI）与独立打开完全一致。
+  const EMBED = new URLSearchParams(window.location.search).get('embed') === '1';
+
   // ── 两个核心模态入口按钮（收束 L2；左上=游戏态、左下=对话态）───────────────
   // 让你按真实交互逻辑模拟检阅：左上小挂件按钮(游戏态占位)，左下展开输入框进入对话态发送。
   buildModeButtons();
@@ -1402,13 +1407,17 @@ document.addEventListener('DOMContentLoaded', () => {
     press(convoBtn); press(sendBtn);
     let convoOpen = false;
     const openConvo = () => { convoOpen = true;
-      convoInput.style.width = '150px'; convoInput.style.padding = '9px'; convoInput.style.opacity = '1';
+      convoInput.style.width = EMBED ? 'min(48vw, 200px)' : '150px'; convoInput.style.padding = '9px 12px'; convoInput.style.opacity = '1';
       sendBtn.style.width = '52px'; sendBtn.style.padding = '0 8px'; sendBtn.style.opacity = '1';
-      convoBtn.style.background = 'rgba(58,109,240,0.6)'; setTimeout(() => convoInput.focus(), 60); };
+      if (EMBED) { convoBtn.style.background = 'var(--ze-ac, #87C8B4)'; convoBtn.style.color = 'var(--ze-onac, #14332a)'; convoBtn.style.borderColor = 'transparent'; }
+      else convoBtn.style.background = 'rgba(58,109,240,0.6)';
+      setTimeout(() => convoInput.focus(), 60); };
     const closeConvo = () => { convoOpen = false;
       convoInput.style.width = '0'; convoInput.style.padding = '0'; convoInput.style.opacity = '0';
       sendBtn.style.width = '0'; sendBtn.style.padding = '0'; sendBtn.style.opacity = '0';
-      convoBtn.style.background = 'rgba(28,32,48,0.55)'; exitConversation(); enterOrigin(); };
+      if (EMBED) { convoBtn.style.background = ''; convoBtn.style.color = ''; convoBtn.style.borderColor = ''; }
+      else convoBtn.style.background = 'rgba(28,32,48,0.55)';
+      exitConversation(); enterOrigin(); };
     const doSend = () => { const t = convoInput.value.trim(); if (t) { sendConversation(t); convoInput.value = ''; } };
     convoBtn.addEventListener('pointerdown', stop);
     convoBtn.addEventListener('click', e => { stop(e); convoOpen ? closeConvo() : openConvo(); });
@@ -1417,6 +1426,32 @@ document.addEventListener('DOMContentLoaded', () => {
     sendBtn.addEventListener('pointerdown', stop);
     sendBtn.addEventListener('click', e => { stop(e); doSend(); });
     convoWrap.append(convoBtn, convoInput, sendBtn);
+
+    // 嵌入模式：按钮融入宿主的纸面风（楷体印钮、跟随主题与强调色）；
+    // 游戏入口从左上移到右下——左上让给精灵的"天空"，拇指也更够得着。
+    if (EMBED) {
+      const EPILL = 'border-radius:14px;border:1px solid color-mix(in srgb, var(--zl-fg) 18%, transparent);'
+        + 'background:color-mix(in srgb, var(--zl-bg) 78%, transparent);'
+        + 'backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);color:var(--zl-fg);'
+        + 'box-shadow:0 2px 12px color-mix(in srgb, var(--zl-fg) 12%, transparent);cursor:pointer;'
+        + 'font-family:"Kaiti SC","STKaiti","KaiTi","Noto Serif SC",serif;line-height:1;'
+        + 'transition:transform .18s cubic-bezier(.2,.8,.2,1),background .2s,color .2s,opacity .2s;';
+      gameBtn.textContent = '戏';
+      gameBtn.title = '文字消消乐';
+      gameBtn.style.cssText = 'position:absolute;right:12px;bottom:12px;width:44px;height:44px;font-size:21px;' + EPILL;
+      convoWrap.style.cssText = 'position:absolute;left:12px;bottom:12px;right:68px;display:flex;gap:8px;align-items:center;';
+      convoBtn.textContent = '言';
+      convoBtn.style.cssText = 'width:44px;height:44px;font-size:21px;flex:none;' + EPILL;
+      convoInput.style.cssText = 'width:0;padding:0;opacity:0;border-radius:13px;box-sizing:border-box;height:42px;'
+        + 'border:1px solid color-mix(in srgb, var(--zl-fg) 20%, transparent);'
+        + 'background:color-mix(in srgb, var(--zl-bg) 92%, transparent);color:var(--zl-fg);'
+        + 'font-size:14px;outline:none;'
+        + 'transition:width .26s cubic-bezier(.2,.8,.2,1),opacity .22s,padding .26s;';
+      sendBtn.style.cssText = 'width:0;padding:0;opacity:0;height:42px;font-size:13px;overflow:hidden;flex:none;'
+        + 'border-radius:13px;border:none;background:var(--ze-ac, #87C8B4);color:var(--ze-onac, #14332a);'
+        + 'letter-spacing:.08em;cursor:pointer;'
+        + 'transition:width .26s cubic-bezier(.2,.8,.2,1),opacity .22s,padding .26s;';
+    }
 
     overlay.append(gameBtn, convoWrap);
   }
@@ -1433,6 +1468,11 @@ document.addEventListener('DOMContentLoaded', () => {
         + 'font-size:13px;pointer-events:none;transition:opacity .3s;opacity:0;';
       overlay.append(toastEl);
     }
+    if (EMBED) {   // 嵌入模式：提示气泡跟随宿主主题（墨底纸字），不再固定深色
+      toastEl.style.background = 'color-mix(in srgb, var(--zl-fg) 88%, transparent)';
+      toastEl.style.color = 'var(--zl-bg)';
+      toastEl.style.borderRadius = '999px';
+    }
     toastEl.textContent = msg; toastEl.style.opacity = '1';
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => { toastEl.style.opacity = '0'; }, 1600);
@@ -1440,7 +1480,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── 调试面板（网页快捷查验：任意巨字 / 全部颜文字 / 曲线）─────────────────
   // 接入云端 AI 后即用 applyMegachar/applyEmojiKey 这些入口即时呈现任意字。
-  buildDebugPanel();
+  // 嵌入模式不建：设置已融入宿主 App 设置页，调试台用独立打开 ziling.html 查验。
+  if (!EMBED) buildDebugPanel();
   function buildDebugPanel() {
     const overlay = document.getElementById('ui-overlay');
     if (!overlay) return;
@@ -1606,6 +1647,33 @@ document.addEventListener('DOMContentLoaded', () => {
     applyThemeMode(s.mode); applyFont(s.font); applyColor(s.color); applyFx(s.fx); applyOriginScale(s.originScale);
   }
   applySavedSettings();
+
+  // ── 嵌入模式：配色跟随宿主 App（URL 首发 + postMessage 实时更新）────────────
+  // 宿主改了字灵设置（写的就是本页同一组 localStorage 键）后发 'ziling:refreshSettings'，
+  // 这里重放 applySavedSettings 即生效。自定义字色仍优先于宿主调色板（与独立页一致）。
+  let hostPalette = null;
+  function applyHostPalette(p) {
+    if (!EMBED || !p || !p.bg) return;
+    hostPalette = p;
+    const root = document.documentElement.style;
+    root.setProperty('--zl-bg', p.bg);
+    if (p.fg && !loadSettings().color) root.setProperty('--zl-fg', p.fg);
+    root.setProperty('--ze-ac', p.ac || '#87C8B4');
+    root.setProperty('--ze-onac', p.onAc || '#14332a');
+    resetGlyphCache();
+  }
+  if (EMBED) {
+    try {
+      const q = new URLSearchParams(location.search);
+      const hex = (k) => (q.get(k) ? '#' + q.get(k) : '');
+      applyHostPalette({ bg: hex('pbg'), fg: hex('pfg'), ac: hex('pac'), onAc: hex('pon') });
+    } catch { /* ignore */ }
+    window.addEventListener('message', (e) => {
+      if (!e.data) return;
+      if (e.data.type === 'ziling:palette') applyHostPalette(e.data.payload);
+      if (e.data.type === 'ziling:refreshSettings') { applySavedSettings(); applyHostPalette(hostPalette); }
+    });
+  }
 
   // ── Drag state ────────────────────────────────────────────
   let dragging = false;
