@@ -391,12 +391,16 @@ html:not([data-ui="modern"]) .ziling-note .note-body p { font-family: var(--font
 
 .field { margin-bottom: 14px; }
 .field label { display: block; font-size: 12px; color: var(--ink-3); letter-spacing: .15em; margin: 0 2px 7px; }
-.field input[type="text"], .field input[type="date"], .field input[type="time"], .field select {
+.field input[type="text"], .field input[type="password"], .field input[type="date"], .field input[type="time"], .field select {
   width: 100%; border: 1px solid var(--hairline); background: var(--paper-3);
   color: var(--ink); border-radius: 12px; padding: 12px 13px; font-size: 15px;
   font-family: inherit; outline: none; appearance: none; -webkit-appearance: none;
 }
 .field input:focus, .field select:focus { border-color: var(--seal); background: var(--paper-2); }
+.inline-row input[type="password"], .inline-row input[type="text"] {
+  border: 1px solid var(--hairline); background: var(--paper-3); color: var(--ink);
+  border-radius: 10px; padding: 9px 11px; font-size: 13.5px; font-family: inherit; outline: none; min-width: 0;
+}
 .field-row { display: flex; gap: 10px; }
 .field-row .field { flex: 1; }
 
@@ -658,9 +662,33 @@ html:not([data-ui="modern"]) .empty { letter-spacing: .12em; padding: 40px 0 30p
 [data-ui="modern"] .group-label { margin: 16px 4px 8px; font-size: 12px; }
 [data-ui="modern"] .cal-wd { font-weight: 600; letter-spacing: 0; }
 [data-ui="modern"] .cal-day { border-radius: 10px; }
-[data-ui="modern"] .field input[type="text"], [data-ui="modern"] .field input[type="date"],
+[data-ui="modern"] .field input[type="text"], [data-ui="modern"] .field input[type="password"],
+[data-ui="modern"] .field input[type="date"],
 [data-ui="modern"] .field input[type="time"], [data-ui="modern"] .field select { border-radius: 10px; padding: 11px 12px; }
 [data-ui="modern"] .pick { border-radius: 9px; }
 [data-ui="modern"] .empty { padding: 26px 0 20px; }
 [data-ui="modern"] .chip { font-weight: 500; }
 [data-ui="modern"] .chip.time { color: var(--seal-deep); background: var(--seal-soft); }
+
+/* ── 闹钟卡片（提醒到点，从顶部落下） ───────────────────────── */
+.alarm-card {
+  position: absolute; left: 14px; right: 14px; top: calc(12px + env(safe-area-inset-top));
+  z-index: 80; display: flex; align-items: center; gap: 12px;
+  background: var(--paper-2); border: 1px solid var(--hairline); border-radius: 18px;
+  box-shadow: var(--shadow-float); padding: 13px 14px;
+  transform: translateY(-130%); transition: transform .35s cubic-bezier(.22,.9,.3,1);
+}
+.alarm-card.in { transform: none; }
+.alarm-card .a-body { flex: 1; min-width: 0; }
+.alarm-card .a-body i { font-style: normal; font-size: 11px; color: var(--seal-deep); letter-spacing: .12em; display: block; margin-bottom: 2px; }
+.alarm-card .a-body p { margin: 0; font-size: 14px; line-height: 1.4; }
+.alarm-card .a-actions { display: flex; flex-direction: column; gap: 5px; flex: none; }
+.alarm-card .a-actions button {
+  border: 1px solid var(--hairline); background: var(--paper-3); color: var(--ink);
+  border-radius: 9px; padding: 5px 11px; font-size: 12px; cursor: pointer; font-family: inherit;
+}
+.alarm-card .a-actions button:first-child { background: var(--seal); color: var(--on-accent); border-color: transparent; }
+
+/* 团队切换条：与成员条同件不同味——略小、贴顶 */
+.team-strip { padding-bottom: 2px; margin-bottom: 6px; }
+.team-strip .big-avatar { width: 44px; height: 44px; border-radius: 13px; font-size: 20px; }

@@ -22,8 +22,19 @@ const DEEPSEEK_MODEL = 'deepseek-chat';
 /* ── 配置读取 ─────────────────────────────────────────────── */
 
 function apiBase() {
-  const base = (typeof window !== 'undefined' && window.ZILING_CONFIG?.apiBase) || '';
+  // 优先级：宿主注入 ZILING_CONFIG（原始契约 /api/*、裸 JSON）→ localStorage 网关
+  // （宿主 App 登录 zicodo 后写入 'ziling.gateway'，走 /ziling/api/*、{code,data} 包裹）。
+  let base = (typeof window !== 'undefined' && window.ZILING_CONFIG?.apiBase) || '';
+  if (!base) { try { base = localStorage.getItem('ziling.gateway') || ''; } catch { /* */ } }
   return base.replace(/\/$/, '');
+}
+function apiPrefix() {
+  if (typeof window !== 'undefined' && window.ZILING_CONFIG?.apiBase) return '/api';
+  try { return localStorage.getItem('ziling.gateway.prefix') || '/ziling/api'; } catch { return '/ziling/api'; }
+}
+function authToken() {
+  // 与宿主 App 同源共享的登录态（zicodo JWT）；带上则后端可读宠物名/保存对话，不带也能用。
+  try { return localStorage.getItem('zl.api.token') || ''; } catch { return ''; }
 }
 function userKey() {
   try { return (typeof localStorage !== 'undefined' && localStorage.getItem(LS_KEY)) || ''; }
@@ -53,13 +64,20 @@ export function memoryOn() { try { return localStorage.getItem(LS_MEMORY) !== '0
 /* ── 后端网关请求 ─────────────────────────────────────────── */
 
 async function backend(path, body, method = 'POST') {
-  const res = await fetch(`${apiBase()}${path}`, {
+  const token = authToken();
+  const res = await fetch(`${apiBase()}${apiPrefix()}${path}`, {
     method,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: method === 'GET' ? undefined : JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+  const json = await res.json();
+  // zicodo 统一包裹 {code,message,data}：code≠0 视为业务错误；裸 JSON（原始契约）原样返回。
+  if (json && typeof json === 'object' && typeof json.code === 'number' && 'data' in json) {
+    if (json.code !== 0) throw new Error(json.message || `code ${json.code}`);
+    return json.data;
+  }
+  return json;
 }
 
 /* ── 用户自带 Key：浏览器直连 DeepSeek（仅本机调试用） ──────────
@@ -102,7 +120,7 @@ async function direct(systemPrompt, userContent, temperature = 1.0, history = []
 /* ── 对外 API（三态统一入口；失败自动回退 Mock，绝不让前端崩） ── */
 
 export async function ping() {
-  if (aiSource() === 'backend') { try { return await backend('/api/ping', null, 'GET'); } catch { /* fall */ } }
+  if (aiSource() === 'backend') { try { return await backend('/ping', null, 'GET'); } catch { /* fall */ } }
   return { status: 'ok', source: aiSource() };
 }
 
@@ -111,7 +129,7 @@ const personaLine = () => { const p = getPersona(); return p ? `\n人设/风格�
 /** 互动态：日程反馈 → { message, emoji } */
 export async function schedule(sch) {
   try {
-    if (aiSource() === 'backend') return await backend('/api/schedule', { ...sch, persona: getPersona() });
+    if (aiSource() === 'backend') return await backend('/schedule', { ...sch, persona: getPersona() });
     if (aiSource() === 'direct') return await direct(SYSTEM_PROMPT_SCHEDULE + personaLine(), JSON.stringify(sch));
   } catch (e) { console.warn('[ai] schedule fallback to mock:', e.message); }
   return mockSchedule(sch);
@@ -125,7 +143,7 @@ export async function chat(message, history = [], ctx = {}) {
   const hist = memoryOn() ? history : [];
   const schedule = ctx && ctx.schedule || null;
   try {
-    if (aiSource() === 'backend') return await backend('/api/chat', { message, history: hist, persona: getPersona(), schedule });
+    if (aiSource() === 'backend') return await backend('/chat', { message, history: hist, persona: getPersona(), schedule });
     if (aiSource() === 'direct') {
       const sched = schedule ? `\n【用户当前日程】${JSON.stringify(schedule)}。回答涉及日程的问题时请据此给出基于其实际安排/习惯的具体建议。` : '';
       return await direct(SYSTEM_PROMPT_CHAT + personaLine() + sched, message, 0.85, hist);
@@ -138,7 +156,7 @@ export async function chat(message, history = [], ctx = {}) {
  *  判定从严：只认"两字直接相连成的现代汉语常用双字词"，温度 0 求稳；并校验 AI 回的词确实由这两字组成。 */
 export async function validateWord(char1, char2) {
   try {
-    if (aiSource() === 'backend') return await backend('/api/validate', { char1, char2 });
+    if (aiSource() === 'backend') return await backend('/validate', { char1, char2 });
     if (aiSource() === 'direct') {
       const sys = '你是严格的中文组词判定器。判断给定两个汉字能否直接相连（顺序不论，不加任何其他字）组成一个'
         + '现代汉语里真实存在、有意义的【常用双字词】。判定从严：生僻词、文言、专有名词、需要加字才成词的一律判否；'
