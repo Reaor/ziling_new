@@ -6,8 +6,8 @@
 
 const KEY = 'zlapp.v1';
 
-/** 成员印章配色（朱砂之外的辅色，保证头像区分度且都"耐看"） */
-export const MEMBER_COLORS = ['#b03a2e', '#3d6470', '#9a7b2d', '#4a7c59', '#6c5b8f', '#a4604f', '#41698c', '#8a6d3b'];
+/** 成员印章配色（青瓷主色领衔，其余取耐看的矿物色，保证头像区分度） */
+export const MEMBER_COLORS = ['#569b86', '#3d6470', '#9a7b2d', '#6c5b8f', '#a4604f', '#41698c', '#4a7c59', '#8a6d3b'];
 
 export const TAGS = [
   { id: 'work',  name: '工作', cls: 'tag-work' },
@@ -44,7 +44,7 @@ function seed() {
   ];
   return {
     profile: { name: '行者', motto: '把日子过成诗' },
-    settings: { theme: 'auto' },
+    settings: { theme: 'auto', uiStyle: null },   // uiStyle: null=首次进入待选 | 'ink' 水墨 | 'modern' 现代
     teamName: '同行小队',
     members,
     tasks,
@@ -65,6 +65,7 @@ export function load() {
     const raw = localStorage.getItem(KEY);
     state = raw ? JSON.parse(raw) : seed();
   } catch { state = seed(); }
+  if (!('uiStyle' in state.settings)) state.settings.uiStyle = null;   // 旧数据迁移
   save();
   return state;
 }
@@ -195,6 +196,7 @@ export function weekStats() {
 /* ── 个人 / 偏好 ────────────────────────────────────────── */
 export function setProfile(patch) { Object.assign(state.profile, patch); save(); }
 export function setTheme(theme) { state.settings.theme = theme; save(); }
+export function setUIStyle(style) { state.settings.uiStyle = style; save(); }
 
 export function totalStats() {
   const ts = get().tasks;

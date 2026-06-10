@@ -1,11 +1,11 @@
 /* ════════════════════════════════════════════════════════════════════
    字灵日程 · App 外壳设计系统
-   气质：宣纸 / 墨色 / 朱砂印 —— 高级东方文人感，但组件密度与可用性是现代 App 的。
+   气质：宣纸 / 墨色 / 青瓷印（主色 #87C8B4）—— 高级东方文人感，但组件密度与可用性是现代 App 的。
    主题：浅(宣纸) / 深(夜墨)，由 <html data-theme> 控制（auto 时 JS 跟随系统）。
    ════════════════════════════════════════════════════════════════════ */
 
 :root {
-  /* —— 宣纸（浅色） —— */
+  /* —— 宣纸（浅色）—— 主色调：青瓷 #87C8B4 */
   --paper:      #f6f2e9;   /* 底：宣纸暖白 */
   --paper-2:    #fffdf7;   /* 卡片：略亮一层 */
   --paper-3:    #efe9dc;   /* 凹陷/输入底 */
@@ -13,11 +13,14 @@
   --ink-2:      #6f6757;   /* 次级文字 */
   --ink-3:      #a39a87;   /* 弱化文字/占位 */
   --hairline:   rgba(43, 39, 34, .10);
-  --seal:       #b03a2e;   /* 朱砂 */
-  --seal-soft:  rgba(176, 58, 46, .09);
+  --seal:       #87C8B4;   /* 主色 · 青瓷（大面积填充：印钮/进度/选中） */
+  --seal-deep:  #43806e;   /* 主色深阶（文字级强调，保证浅底可读） */
+  --seal-soft:  rgba(135, 200, 180, .16);
+  --on-accent:  #14332a;   /* 青瓷底上的文字：深松绿墨 */
+  --danger:     #b03a2e;   /* 危险/删除（不再与主色混用） */
   --cyan:       #3d6470;   /* 黛青（次强调：时间/链接） */
   --gold:       #9a7b2d;   /* 赭金（搁置/提醒） */
-  --jade:       #4a7c59;   /* 松绿（完成） */
+  --jade:       #4a7c59;   /* 松绿（生活标签） */
   --shadow-card: 0 1px 2px rgba(43,39,34,.05), 0 6px 24px -8px rgba(43,39,34,.10);
   --shadow-float: 0 4px 10px rgba(43,39,34,.18), 0 16px 40px -8px rgba(43,39,34,.22);
   --blur-bar: saturate(1.1) blur(18px);
@@ -35,8 +38,11 @@ html[data-theme="dark"] {
   --ink-2:      #a59d8e;
   --ink-3:      #6d675c;
   --hairline:   rgba(234, 230, 220, .10);
-  --seal:       #c9554a;
-  --seal-soft:  rgba(201, 85, 74, .14);
+  --seal:       #87C8B4;
+  --seal-deep:  #9ad3c2;   /* 深色底上的文字级强调：取主色亮阶 */
+  --seal-soft:  rgba(135, 200, 180, .13);
+  --on-accent:  #14332a;
+  --danger:     #d05c50;
   --cyan:       #7ba7b3;
   --gold:       #c2a558;
   --jade:       #7fae8e;
@@ -61,7 +67,7 @@ body {
   width: 100vw; height: 100vh; height: 100dvh;
   max-width: 480px;
   background:
-    radial-gradient(120% 90% at 50% 0%, rgba(176,58,46,.035), transparent 55%),
+    radial-gradient(120% 90% at 50% 0%, rgba(135,200,180,.06), transparent 55%),
     var(--paper);
   overflow: hidden;
   display: flex; flex-direction: column;
@@ -102,7 +108,7 @@ body {
 /* ── 页头 ─────────────────────────────────────────────────── */
 .page-head { margin: 10px 2px 18px; }
 .page-head .eyebrow {
-  font-size: 12px; letter-spacing: .35em; color: var(--seal);
+  font-size: 12px; letter-spacing: .35em; color: var(--seal-deep);
   margin-bottom: 6px; font-weight: 500;
 }
 .page-head h1 {
@@ -162,13 +168,15 @@ body {
 }
 .ziling-note .seal-avatar {
   flex: none; width: 44px; height: 44px; border-radius: 12px;
-  background: var(--seal); color: #f6f2e9;
+  background: var(--seal); color: var(--on-accent);
   display: flex; align-items: center; justify-content: center;
   font-family: var(--font-display); font-size: 24px;
-  box-shadow: 0 3px 10px -2px rgba(176,58,46,.5);
+  box-shadow: 0 3px 10px -2px color-mix(in srgb, var(--seal) 55%, transparent);
 }
 .ziling-note .note-body { flex: 1; min-width: 0; }
-.ziling-note .note-body i { font-style: normal; font-size: 11px; letter-spacing: .25em; color: var(--seal); display: block; margin-bottom: 3px; }
+.ziling-note .note-body i { font-style: normal; font-size: 11px; letter-spacing: .25em; color: var(--seal-deep); display: block; margin-bottom: 3px; }
+/* 水墨风：寄语正文用楷体，更有"手写信"的味道 */
+html:not([data-ui="modern"]) .ziling-note .note-body p { font-family: var(--font-display); font-size: 14.5px; }
 .ziling-note .note-body p { margin: 0; font-size: 13.5px; color: var(--ink-2); line-height: 1.55; }
 .ziling-note .go { color: var(--ink-3); font-size: 18px; }
 
@@ -196,7 +204,7 @@ body {
   color: transparent; font-size: 13px;
   transition: all .2s ease;
 }
-.task.done .tick { background: var(--jade); border-color: var(--jade); color: #fff; }
+.task.done .tick { background: var(--seal); border-color: var(--seal); color: var(--on-accent); }
 .task.delayed .tick { border-style: dashed; border-color: var(--gold); }
 
 .t-main { flex: 1; min-width: 0; }
@@ -208,7 +216,7 @@ body {
 }
 .chip.time { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 10%, transparent); font-variant-numeric: tabular-nums; }
 .chip.delay { color: var(--gold); background: color-mix(in srgb, var(--gold) 12%, transparent); }
-.chip.tag-work  { color: var(--seal); background: var(--seal-soft); }
+.chip.tag-work  { color: var(--seal-deep); background: var(--seal-soft); }
 .chip.tag-life  { color: var(--jade); background: color-mix(in srgb, var(--jade) 12%, transparent); }
 .chip.tag-study { color: var(--cyan); background: color-mix(in srgb, var(--cyan) 12%, transparent); }
 
@@ -228,13 +236,14 @@ body {
 /* ── 悬浮新建（朱砂印钮） ────────────────────────────────────── */
 .fab {
   position: absolute; right: 20px; bottom: calc(84px + env(safe-area-inset-bottom));
-  width: 54px; height: 54px; border-radius: 16px;
-  background: var(--seal); color: #f6f2e9; border: none;
+  width: 54px; height: 54px; border-radius: 50%;   /* 水墨：圆印钮 */
+  background: var(--seal); color: var(--on-accent); border: none;
   font-size: 26px; line-height: 1; cursor: pointer;
   box-shadow: var(--shadow-float);
   transition: transform .18s ease;
   z-index: 30;
 }
+[data-ui="modern"] .fab { border-radius: 16px; }   /* 现代：圆角方钮 */
 .fab:active { transform: scale(.92) rotate(90deg); }
 
 /* ── 日历 ─────────────────────────────────────────────────── */
@@ -253,13 +262,13 @@ body {
   font-variant-numeric: tabular-nums; color: var(--ink);
 }
 .cal-day.dim { color: var(--ink-3); opacity: .5; }
-.cal-day.today { border-color: var(--seal); color: var(--seal); font-weight: 600; }
-.cal-day.sel { background: var(--seal); color: #f6f2e9 !important; font-weight: 600; box-shadow: 0 4px 12px -2px rgba(176,58,46,.45); }
+.cal-day.today { border-color: var(--seal-deep); color: var(--seal-deep); font-weight: 600; }
+.cal-day.sel { background: var(--seal); color: var(--on-accent) !important; font-weight: 600; box-shadow: 0 4px 12px -2px color-mix(in srgb, var(--seal) 55%, transparent); }
 .cal-dots { display: flex; gap: 3px; height: 4px; }
 .cal-dots i { width: 4px; height: 4px; border-radius: 50%; background: var(--ink-3); }
-.cal-dots i.d-pending { background: var(--seal); }
-.cal-dots i.d-done { background: var(--jade); }
-.cal-day.sel .cal-dots i { background: rgba(246,242,233,.9); }
+.cal-dots i.d-pending { background: var(--seal-deep); }
+.cal-dots i.d-done { background: var(--ink-3); opacity: .55; }
+.cal-day.sel .cal-dots i { background: color-mix(in srgb, var(--on-accent) 75%, transparent); }
 
 /* ── 团队 ─────────────────────────────────────────────────── */
 .member-strip { display: flex; gap: 14px; overflow-x: auto; padding: 4px 2px 8px; scrollbar-width: none; }
@@ -312,7 +321,7 @@ body {
 .cell .c-label { flex: 1; font-size: 14.5px; }
 .cell .c-value { font-size: 13px; color: var(--ink-3); }
 .cell .c-go { color: var(--ink-3); }
-.cell.danger .c-label, .cell.danger .c-icon { color: var(--seal); }
+.cell.danger .c-label, .cell.danger .c-icon { color: var(--danger); }
 
 /* 分段选择（主题等） */
 .seg { display: flex; background: var(--paper-3); border-radius: 11px; padding: 3px; gap: 3px; }
@@ -349,14 +358,14 @@ body {
 .tab-center { flex: 1.1; }
 .tab-seal {
   width: 46px; height: 46px; border-radius: 14px;
-  background: var(--seal); color: #f6f2e9;
+  background: var(--seal); color: var(--on-accent);
   display: flex; align-items: center; justify-content: center;
   font-family: var(--font-display); font-size: 25px;
-  box-shadow: 0 4px 14px -2px rgba(176,58,46,.55);
+  box-shadow: 0 4px 14px -2px color-mix(in srgb, var(--seal) 65%, transparent);
   transform: translateY(-10px);
   transition: transform .2s ease, box-shadow .2s ease;
 }
-.tab-center.active .tab-seal { transform: translateY(-12px) scale(1.06); box-shadow: 0 8px 20px -2px rgba(176,58,46,.6); }
+.tab-center.active .tab-seal { transform: translateY(-12px) scale(1.06); box-shadow: 0 8px 20px -2px color-mix(in srgb, var(--seal) 70%, transparent); }
 .tab-center::after { display: none; }
 
 /* ── 抽屉 / 遮罩 ──────────────────────────────────────────── */
@@ -406,10 +415,10 @@ body {
   padding: 14px; font-size: 16px; cursor: pointer; font-family: inherit;
   letter-spacing: .2em; text-indent: .2em;
 }
-.btn-primary { background: var(--seal); color: #f6f2e9; box-shadow: 0 6px 18px -4px rgba(176,58,46,.5); }
+.btn-primary { background: var(--seal); color: var(--on-accent); box-shadow: 0 6px 18px -4px color-mix(in srgb, var(--seal) 60%, transparent); }
 .btn-primary:active { transform: scale(.98); }
 .btn-ghost { background: transparent; color: var(--ink-2); padding: 10px; font-size: 14px; }
-.btn-danger-line { background: transparent; color: var(--seal); border: 1px solid var(--seal); }
+.btn-danger-line { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
 
 /* 任务详情抽屉的操作格 */
 .action-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 9px; margin-top: 6px; }
@@ -420,7 +429,7 @@ body {
 }
 .action-grid button .a-glyph { font-family: var(--font-display); font-size: 19px; }
 .action-grid button.warm { color: var(--gold); }
-.action-grid button.danger { color: var(--seal); }
+.action-grid button.danger { color: var(--danger); }
 
 /* ── 轻提示 ──────────────────────────────────────────────── */
 #toast {
@@ -451,3 +460,207 @@ body {
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .01s !important; transition-duration: .01s !important; }
 }
+
+/* ════════════════════════════════════════════════════════════════════
+   双风格 · 现代「案头」风（data-ui="modern"）
+   定位：高级感办公软件——克制的中性灰底、白卡片、靛蓝强调、系统无衬线、
+   去书法字距与朱印意象，信息密度与层级更"整齐"。
+   ════════════════════════════════════════════════════════════════════ */
+
+html[data-ui="modern"] {
+  --paper:      #f3f5f4;
+  --paper-2:    #ffffff;
+  --paper-3:    #eaeeec;
+  --ink:        #1d2724;
+  --ink-2:      #5b6663;
+  --ink-3:      #97a3a0;
+  --hairline:   rgba(29, 39, 36, .09);
+  --seal:       #87C8B4;   /* 主色 · 青瓷 */
+  --seal-deep:  #2f7d68;   /* 链接/文字级强调 */
+  --seal-soft:  rgba(135, 200, 180, .14);
+  --on-accent:  #113B30;
+  --danger:     #d6453d;
+  --cyan:       #0b7285;
+  --gold:       #b08015;
+  --jade:       #2f9e63;
+  --shadow-card: 0 1px 2px rgba(28,36,48,.04), 0 4px 16px -6px rgba(28,36,48,.08);
+  --shadow-float: 0 4px 10px rgba(28,36,48,.14), 0 14px 36px -8px rgba(28,36,48,.18);
+  --bar-bg: rgba(255, 255, 255, .88);
+  --radius: 14px;
+  --font-display: var(--font-body);
+}
+html[data-ui="modern"][data-theme="dark"] {
+  --paper:      #0f1413;
+  --paper-2:    #171d1b;
+  --paper-3:    #212927;
+  --ink:        #e5ebe9;
+  --ink-2:      #99a5a2;
+  --ink-3:      #62706c;
+  --hairline:   rgba(229, 235, 233, .09);
+  --seal:       #87C8B4;
+  --seal-deep:  #93d2bf;
+  --seal-soft:  rgba(135, 200, 180, .13);
+  --on-accent:  #113B30;
+  --danger:     #e06b62;
+  --cyan:       #66b8c7;
+  --gold:       #c9a449;
+  --jade:       #62b388;
+  --shadow-card: 0 1px 2px rgba(0,0,0,.3), 0 6px 20px -8px rgba(0,0,0,.5);
+  --shadow-float: 0 4px 12px rgba(0,0,0,.45), 0 16px 40px -8px rgba(0,0,0,.55);
+  --bar-bg: rgba(16, 18, 22, .88);
+}
+
+/* 现代风的排印：去书法字距、加重字重、信息更"对齐" */
+html[data-ui="modern"] #phone { background: var(--paper); }
+[data-ui="modern"] .page-head .eyebrow { letter-spacing: .14em; color: var(--ink-3); font-weight: 600; font-size: 11.5px; }
+[data-ui="modern"] .page-head h1 { font-weight: 650; font-size: 27px; letter-spacing: 0; }
+[data-ui="modern"] .card-title b { font-weight: 600; font-size: 15px; letter-spacing: 0; }
+[data-ui="modern"] .group-label { letter-spacing: .08em; font-weight: 600; }
+[data-ui="modern"] .overview-text .greet { font-weight: 600; font-size: 17px; }
+[data-ui="modern"] .tab-glyph { font-weight: 600; font-size: 17px; }
+[data-ui="modern"] .tab-seal { font-weight: 700; font-size: 19px; border-radius: 16px; box-shadow: 0 4px 14px -2px color-mix(in srgb, var(--seal) 55%, transparent); }
+[data-ui="modern"] .tab-center.active .tab-seal { box-shadow: 0 8px 20px -2px color-mix(in srgb, var(--seal) 60%, transparent); }
+[data-ui="modern"] .btn { letter-spacing: .02em; text-indent: 0; font-weight: 600; font-size: 15px; }
+[data-ui="modern"] .btn-primary { box-shadow: 0 6px 18px -4px color-mix(in srgb, var(--seal) 50%, transparent); color: var(--on-accent); }
+[data-ui="modern"] .sheet-title { font-weight: 650; font-size: 18px; letter-spacing: 0; }
+[data-ui="modern"] .me-name, [data-ui="modern"] .me-avatar,
+[data-ui="modern"] .seal-avatar, [data-ui="modern"] .dot-avatar,
+[data-ui="modern"] .big-avatar, [data-ui="modern"] .zl-load-glyph,
+[data-ui="modern"] .cell .c-icon, [data-ui="modern"] .action-grid button .a-glyph,
+[data-ui="modern"] .empty .e-glyph { font-family: var(--font-body); font-weight: 600; }
+[data-ui="modern"] .ziling-note .note-body i { letter-spacing: .14em; font-weight: 600; }
+[data-ui="modern"] .field label { letter-spacing: .06em; font-weight: 600; }
+[data-ui="modern"] .cal-day.sel { box-shadow: 0 4px 12px -2px color-mix(in srgb, var(--seal) 45%, transparent); color: var(--on-accent) !important; }
+[data-ui="modern"] .tab-seal, [data-ui="modern"] .seal-avatar, [data-ui="modern"] .fab { color: var(--on-accent); }
+[data-ui="modern"] #toast { letter-spacing: .02em; }
+
+/* 宣纸纹理：仅水墨风。极淡的噪点 + 纤维感，远看是"纸"，近看不抢内容 */
+html:not([data-ui="modern"]) #phone::before {
+  content: '';
+  position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E");
+  opacity: .05;
+  mix-blend-mode: multiply;
+}
+html:not([data-ui="modern"])[data-theme="dark"] #phone::before { mix-blend-mode: screen; opacity: .035; }
+
+/* ── 首次进入 · 风格选择 ─────────────────────────────────── */
+#style-pick {
+  position: absolute; inset: 0; z-index: 95;
+  background: var(--paper);
+  display: flex; flex-direction: column; justify-content: center;
+  padding: 30px 26px calc(30px + env(safe-area-inset-bottom));
+  opacity: 0; transition: opacity .5s ease;
+}
+#style-pick.in { opacity: 1; }
+#style-pick.out { opacity: 0; }
+#style-pick .sp-eyebrow { font-size: 11.5px; letter-spacing: .35em; color: var(--seal); margin-bottom: 8px; }
+#style-pick h2 { margin: 0 0 6px; font-family: var(--font-display); font-weight: 400; font-size: 27px; }
+#style-pick .sp-sub { font-size: 13px; color: var(--ink-2); margin-bottom: 26px; }
+.style-card {
+  display: flex; align-items: center; gap: 16px;
+  border: 1.5px solid var(--hairline); border-radius: 18px;
+  background: var(--paper-2); box-shadow: var(--shadow-card);
+  padding: 16px; margin-bottom: 14px; cursor: pointer;
+  transition: transform .15s ease, border-color .2s ease;
+}
+.style-card:active { transform: scale(.98); }
+.style-card .sc-preview {
+  flex: none; width: 96px; height: 110px; border-radius: 12px; overflow: hidden;
+  position: relative; border: 1px solid var(--hairline);
+}
+.style-card .sc-text { flex: 1; min-width: 0; }
+.style-card .sc-name { display: block; font-size: 17px; font-weight: 600; margin-bottom: 5px; }
+.style-card .sc-desc { display: block; font-size: 12.5px; color: var(--ink-2); line-height: 1.6; }
+.style-card .sc-go { color: var(--ink-3); font-size: 20px; }
+/* 两张缩略预览（纯 CSS 摆出来的微缩界面） */
+.sc-preview.ink-mini { background: #f6f2e9; }
+.sc-preview.ink-mini .pv-head { position: absolute; top: 10px; left: 10px; font-family: 'Kaiti SC','STKaiti','KaiTi',serif; font-size: 15px; color: #2b2722; }
+.sc-preview.ink-mini .pv-seal { position: absolute; top: 10px; right: 10px; width: 14px; height: 14px; border-radius: 4px; background: #87C8B4; }
+.sc-preview.ink-mini .pv-line { position: absolute; left: 10px; right: 10px; height: 14px; border-radius: 5px; background: #fffdf7; border: 1px solid rgba(43,39,34,.1); }
+.sc-preview.modern-mini { background: #f3f5f4; }
+.sc-preview.modern-mini .pv-head { position: absolute; top: 10px; left: 10px; font-size: 12px; font-weight: 700; color: #1d2724; }
+.sc-preview.modern-mini .pv-seal { position: absolute; top: 10px; right: 10px; width: 14px; height: 14px; border-radius: 5px; background: #87C8B4; }
+.sc-preview.modern-mini .pv-line { position: absolute; left: 10px; right: 10px; height: 14px; border-radius: 4px; background: #fff; border: 1px solid rgba(29,39,36,.09); }
+#style-pick .sp-note { text-align: center; font-size: 11.5px; color: var(--ink-3); margin-top: 10px; letter-spacing: .1em; }
+
+/* ── 设置控件：拨动开关 / 滑杆 / 取色 ───────────────────────── */
+.toggle {
+  width: 48px; height: 28px; border-radius: 999px; flex: none; cursor: pointer;
+  background: var(--paper-3); position: relative; transition: background .2s ease;
+  border: 1px solid var(--hairline);
+}
+.toggle::after {
+  content: ''; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+  border-radius: 50%; background: var(--paper-2); box-shadow: 0 1px 4px rgba(0,0,0,.25);
+  transition: left .2s ease;
+}
+.toggle.on { background: var(--seal); border-color: transparent; }
+.toggle.on::after { left: 23px; background: #fff; }
+
+.field input[type="range"] { width: 100%; accent-color: var(--seal); height: 28px; }
+.field input[type="color"] {
+  width: 44px; height: 32px; border: 1px solid var(--hairline); border-radius: 9px;
+  background: var(--paper-3); padding: 2px; cursor: pointer;
+}
+.inline-row { display: flex; align-items: center; gap: 10px; }
+.inline-row .grow { flex: 1; }
+.mini-btn {
+  border: 1px solid var(--hairline); background: var(--paper-3); color: var(--ink-2);
+  border-radius: 9px; padding: 7px 12px; font-size: 12.5px; cursor: pointer; font-family: inherit;
+}
+.hint-text { font-size: 11.5px; color: var(--ink-3); line-height: 1.6; margin-top: 6px; }
+
+/* ════════════════════════════════════════════════════════════════════
+   双风格特化（同一副筋骨，各自把优势做足）
+   · 水墨：艺术性——笔触、印章、楷体、留白与呼吸
+   · 现代：办公性——信息前置、对齐、紧凑、克制
+   ════════════════════════════════════════════════════════════════════ */
+
+/* —— 水墨 · 艺术细节 —— */
+/* 页头笔触下划线：一笔淡青瓷，收笔略挑 */
+html:not([data-ui="modern"]) .brush-line { display: block; margin: 8px 0 0 2px; color: var(--seal); }
+[data-ui="modern"] .brush-line { display: none; }
+/* 页头闲章：右上一方小印，盖着今天的"星期几" */
+.head-seal {
+  position: absolute; right: 4px; top: 14px;
+  width: 40px; height: 40px; border-radius: 10px;
+  background: var(--seal); color: var(--on-accent);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-display); font-size: 21px;
+  box-shadow: 0 3px 10px -2px color-mix(in srgb, var(--seal) 55%, transparent);
+  transform: rotate(3deg);
+}
+[data-ui="modern"] .head-seal { display: none; }
+html:not([data-ui="modern"]) .page-head { position: relative; }
+/* 水墨：进度环里的数字也用楷体，更像题字 */
+html:not([data-ui="modern"]) .ring-num b { font-family: var(--font-display); font-weight: 500; font-size: 23px; }
+/* 水墨：空状态的留白更大、字间更疏 */
+html:not([data-ui="modern"]) .empty { letter-spacing: .12em; padding: 40px 0 30px; }
+
+/* —— 现代 · 办公密度与秩序 —— */
+/* KPI 概览条（现代版"今日"用它替代进度环：数字前置、一眼可读） */
+.kpi-row { display: flex; text-align: center; margin-bottom: 14px; }
+.kpi-row > div { flex: 1; }
+.kpi-row > div + div { border-left: 1px solid var(--hairline); }
+.kpi-row b { display: block; font-size: 22px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.kpi-row b.hl { color: var(--seal-deep); }
+.kpi-row span { font-size: 11px; color: var(--ink-3); letter-spacing: .06em; }
+.kpi-bar { height: 6px; border-radius: 99px; background: var(--paper-3); overflow: hidden; }
+.kpi-bar i { display: block; height: 100%; border-radius: 99px; background: var(--seal); transition: width .7s cubic-bezier(.22,.9,.3,1); }
+/* 任务行更紧凑、阴影更克制、方形勾选框 */
+[data-ui="modern"] .task { padding: 11px 12px; border-radius: 11px; margin-bottom: 7px; box-shadow: none; }
+[data-ui="modern"] .tick { border-radius: 7px; width: 22px; height: 22px; }
+[data-ui="modern"] .t-title { font-size: 14.5px; }
+[data-ui="modern"] .card { box-shadow: var(--shadow-card); }
+[data-ui="modern"] .page-head { margin: 8px 2px 14px; }
+[data-ui="modern"] .page-head .sub { margin-top: 5px; font-size: 13px; }
+[data-ui="modern"] .group-label { margin: 16px 4px 8px; font-size: 12px; }
+[data-ui="modern"] .cal-wd { font-weight: 600; letter-spacing: 0; }
+[data-ui="modern"] .cal-day { border-radius: 10px; }
+[data-ui="modern"] .field input[type="text"], [data-ui="modern"] .field input[type="date"],
+[data-ui="modern"] .field input[type="time"], [data-ui="modern"] .field select { border-radius: 10px; padding: 11px 12px; }
+[data-ui="modern"] .pick { border-radius: 9px; }
+[data-ui="modern"] .empty { padding: 26px 0 20px; }
+[data-ui="modern"] .chip { font-weight: 500; }
+[data-ui="modern"] .chip.time { color: var(--seal-deep); background: var(--seal-soft); }

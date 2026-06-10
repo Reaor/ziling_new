@@ -12,16 +12,24 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 
 store.load();
 
-/* ── 主题 ─────────────────────────────────────────────────── */
+/* ── 主题 + 界面风格（水墨 ink / 现代 modern）──────────────── */
+let zilingFrame = null;   // 字灵 iframe（懒加载；提前声明因 applyTheme 启动时即同步调色板）
 const mqDark = matchMedia('(prefers-color-scheme: dark)');
 function applyTheme() {
   const pref = store.get().settings.theme;
   const mode = pref === 'auto' ? (mqDark.matches ? 'dark' : 'light') : pref;
   document.documentElement.dataset.theme = mode;
-  $('meta[name="theme-color"]').content = mode === 'dark' ? '#17161a' : '#f6f2e9';
+  document.documentElement.dataset.ui = store.get().settings.uiStyle === 'modern' ? 'modern' : 'ink';
+  $('meta[name="theme-color"]').content =
+    getComputedStyle(document.documentElement).getPropertyValue('--paper').trim();
+  sendZilingPalette();
 }
 mqDark.addEventListener('change', applyTheme);
 applyTheme();
+
+const isModern = () => store.get().settings.uiStyle === 'modern';
+/** 双风格文案：水墨版有笔墨气，现代版直白利落。 */
+const T = (ink, modern) => (isModern() ? modern : ink);
 
 /* ── 轻提示 ───────────────────────────────────────────────── */
 let toastTimer = null;
@@ -98,7 +106,7 @@ function bindTaskRows(root) {
       const id = el.dataset.id;
       if (e.target.closest('[data-act="tick"]')) {
         const t = store.toggleDone(id);
-        if (t?.done) toast('完成一件，墨迹又添一笔 ✦');
+        if (t?.done) toast(T('完成一件，墨迹又添一笔 ✦', '已完成 ✓'));
       } else {
         openTaskDetail(id);
       }
@@ -137,38 +145,63 @@ function renderToday() {
   const dateText = d.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' });
   const weekText = d.toLocaleDateString('zh-CN', { weekday: 'long' });
 
+  // 双风格的"今日概览"：
+  // · 水墨——进度环 + 问候 + 页头笔触与闲章（艺术性：留白、笔意、印章）
+  // · 现代——KPI 数字条 + 线性进度（办公性：数字前置、一眼可读）
+  const weekChar = '日一二三四五六'[new Date().getDay()];
   const R = 40, C = 2 * Math.PI * R;
-  page.innerHTML = `
-    <header class="page-head">
-      <div class="eyebrow">${weekText} · ${esc(store.get().profile.motto)}</div>
-      <h1>${dateText}</h1>
-    </header>
-
-    <div class="card overview">
-      <div class="ring-wrap">
-        <svg width="92" height="92" viewBox="0 0 92 92">
-          <circle class="ring-bg" cx="46" cy="46" r="${R}" fill="none" stroke-width="7"/>
-          <circle class="ring-fg" cx="46" cy="46" r="${R}" fill="none" stroke-width="7"
-            stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct / 100)}"/>
+  const headHtml = isModern()
+    ? `<header class="page-head">
+        <div class="eyebrow">${weekText}</div>
+        <h1>${dateText}</h1>
+        <div class="sub">${greeting()}，${esc(store.get().profile.name)} · 今日 ${total} 项，完成 ${pct}%</div>
+      </header>`
+    : `<header class="page-head">
+        <div class="eyebrow">${weekText} · ${esc(store.get().profile.motto)}</div>
+        <h1>${dateText}</h1>
+        <svg class="brush-line" width="150" height="10" viewBox="0 0 150 10" aria-hidden="true">
+          <path d="M2 6 C 40 2, 95 9, 148 4" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" opacity=".85"/>
         </svg>
-        <div class="ring-num"><b>${pct}%</b><span>完成</span></div>
-      </div>
-      <div class="overview-text">
-        <div class="greet">${greeting()}，${esc(store.get().profile.name)}</div>
-        <div class="detail">今日共 <b>${total}</b> 件事 · 已完成 <b>${v.done.length}</b> · 待办 <b>${v.doing.length}</b>${v.delayed.length ? ` · 搁置 <b>${v.delayed.length}</b>` : ''}</div>
-      </div>
-    </div>
+        <span class="head-seal">${weekChar}</span>
+      </header>`;
+  const overviewHtml = isModern()
+    ? `<div class="card">
+        <div class="kpi-row">
+          <div><b class="hl">${v.doing.length}</b><span>待办</span></div>
+          <div><b>${v.done.length}</b><span>已完成</span></div>
+          <div><b>${v.delayed.length}</b><span>搁置/逾期</span></div>
+          <div><b>${pct}%</b><span>完成率</span></div>
+        </div>
+        <div class="kpi-bar"><i style="width:${pct}%"></i></div>
+      </div>`
+    : `<div class="card overview">
+        <div class="ring-wrap">
+          <svg width="92" height="92" viewBox="0 0 92 92">
+            <circle class="ring-bg" cx="46" cy="46" r="${R}" fill="none" stroke-width="7"/>
+            <circle class="ring-fg" cx="46" cy="46" r="${R}" fill="none" stroke-width="7"
+              stroke-dasharray="${C}" stroke-dashoffset="${C * (1 - pct / 100)}"/>
+          </svg>
+          <div class="ring-num"><b>${pct}%</b><span>完成</span></div>
+        </div>
+        <div class="overview-text">
+          <div class="greet">${greeting()}，${esc(store.get().profile.name)}</div>
+          <div class="detail">今日共 <b>${total}</b> 件事 · 已完成 <b>${v.done.length}</b> · 待办 <b>${v.doing.length}</b>${v.delayed.length ? ` · 搁置 <b>${v.delayed.length}</b>` : ''}</div>
+        </div>
+      </div>`;
+  page.innerHTML = `
+    ${headHtml}
+    ${overviewHtml}
 
     <div class="card ziling-note" id="go-ziling">
       <span class="seal-avatar">灵</span>
-      <div class="note-body"><i>字 灵 寄 语</i><p>${zilingQuote(v)}</p></div>
+      <div class="note-body"><i>字灵寄语</i><p>${zilingQuote(v)}</p></div>
       <span class="go">›</span>
     </div>
 
-    ${v.doing.length ? `<div class="group-label">进 行 中<span class="cnt">${v.doing.length}</span></div>${v.doing.map(taskRow).join('')}` : ''}
-    ${v.delayed.length ? `<div class="group-label">搁 置 / 逾 期<span class="cnt">${v.delayed.length}</span></div>${v.delayed.map(taskRow).join('')}` : ''}
-    ${v.done.length ? `<div class="group-label">已 完 成<span class="cnt">${v.done.length}</span></div>${v.done.map(taskRow).join('')}` : ''}
-    ${total === 0 ? emptyBlock('閒', '今日无事<br>点右下角，落下今天第一笔') : ''}
+    ${v.doing.length ? `<div class="group-label">进行中<span class="cnt">${v.doing.length}</span></div>${v.doing.map(taskRow).join('')}` : ''}
+    ${v.delayed.length ? `<div class="group-label">搁置 / 逾期<span class="cnt">${v.delayed.length}</span></div>${v.delayed.map(taskRow).join('')}` : ''}
+    ${v.done.length ? `<div class="group-label">已完成<span class="cnt">${v.done.length}</span></div>${v.done.map(taskRow).join('')}` : ''}
+    ${total === 0 ? emptyBlock('閒', T('今日无事<br>点右下角，落下今天第一笔', '今天还没有任务<br>点右下角新建一条')) : ''}
   `;
   bindTaskRows(page);
   $('#go-ziling', page).addEventListener('click', () => go('ziling'));
@@ -210,7 +243,7 @@ function renderCalendar() {
 
   page.innerHTML = `
     <header class="page-head">
-      <div class="eyebrow">日 历</div>
+      <div class="eyebrow">日历</div>
       <h1>${y} 年 ${m + 1} 月</h1>
     </header>
     <div class="card">
@@ -225,7 +258,7 @@ function renderCalendar() {
       </div>
     </div>
     <div class="group-label">${selLabel}<span class="cnt">${selTasks.length} 件</span></div>
-    ${selTasks.length ? selTasks.map(taskRow).join('') : emptyBlock('白', '这一天还是留白<br>点右下角为它写点什么')}
+    ${selTasks.length ? selTasks.map(taskRow).join('') : emptyBlock('白', T('这一天还是留白<br>点右下角为它写点什么', '这一天还没有安排<br>点右下角新建'))}
   `;
   page.querySelectorAll('[data-nav]').forEach((b) => b.addEventListener('click', () => {
     calCursor = new Date(y, m + Number(b.dataset.nav), 1);
@@ -241,15 +274,25 @@ function renderCalendar() {
 }
 
 /* ════════════════════════════ 字灵页 ══════════════════════════ */
-let zilingFrame = null;
+
+/** 当前主题/风格下要传给字灵的调色板（让它的背景、按钮与 App 浑然一体）。 */
+function zilingPalette() {
+  const cs = getComputedStyle(document.documentElement);
+  const c = (n) => cs.getPropertyValue(n).trim();
+  return { bg: c('--paper'), fg: c('--ink'), ac: c('--seal'), onAc: c('--on-accent') };
+}
 
 function openZiling() {
   if (!zilingFrame) {
+    const p = zilingPalette();
+    const hex = (s) => encodeURIComponent(s.replace('#', ''));
     zilingFrame = document.createElement('iframe');
     zilingFrame.title = '字灵 · 汉字精灵';
     zilingFrame.allow = 'clipboard-write';
-    // 通过 URL 直接带上当日日程，iframe 一加载字灵就会播报；后续更新走 postMessage。
-    zilingFrame.src = `ziling.html?schedule=${encodeURIComponent(JSON.stringify(store.zilingPayload()))}`;
+    // embed=1 进入嵌入模式（按钮融入宿主风格、设置融入 App）；调色板与当日日程经 URL 首发，
+    // 后续更新走 postMessage。
+    zilingFrame.src = `ziling.html?embed=1&pbg=${hex(p.bg)}&pfg=${hex(p.fg)}&pac=${hex(p.ac)}&pon=${hex(p.onAc)}`
+      + `&schedule=${encodeURIComponent(JSON.stringify(store.zilingPayload()))}`;
     zilingFrame.addEventListener('load', () => {
       $('#ziling-loading')?.remove();
       feedZiling();
@@ -267,6 +310,15 @@ function feedZiling() {
   feedTimer = setTimeout(() => {
     try { zilingFrame.contentWindow.postMessage({ type: 'ziling:schedule', payload: store.zilingPayload() }, '*'); } catch { /* iframe 未就绪时忽略 */ }
   }, 400);
+}
+
+function sendZilingPalette() {
+  try { zilingFrame?.contentWindow?.postMessage({ type: 'ziling:palette', payload: zilingPalette() }, '*'); } catch { /* ignore */ }
+}
+
+/** App 侧改了字灵设置（同一组 localStorage 键）后，通知 iframe 重放设置。 */
+function refreshZilingSettings() {
+  try { zilingFrame?.contentWindow?.postMessage({ type: 'ziling:refreshSettings' }, '*'); } catch { /* ignore */ }
 }
 
 /* ════════════════════════════ 团队 ══════════════════════════ */
@@ -292,7 +344,7 @@ function renderTeam() {
 
   page.innerHTML = `
     <header class="page-head">
-      <div class="eyebrow">同 舟 共 济</div>
+      <div class="eyebrow">${T('同舟共济', '团队协作')}</div>
       <h1 id="team-name">${esc(st.teamName)}</h1>
       <div class="sub">${st.members.length} 位成员 · 轻触队名可改 · 任务可指派给任何人</div>
     </header>
@@ -321,7 +373,7 @@ function renderTeam() {
         </div>`).join('')}
     </div>
 
-    <div class="group-label">${teamFilter ? esc(store.memberOf(teamFilter).name) + ' 的任务' : '团 队 任 务'}<span class="cnt">${teamTasks.length}</span></div>
+    <div class="group-label">${teamFilter ? esc(store.memberOf(teamFilter).name) + ' 的任务' : '团队任务'}<span class="cnt">${teamTasks.length}</span></div>
     ${teamTasks.length ? teamTasks.map(taskRow).join('') : emptyBlock('和', '暂无任务<br>去「今日」页新建并指派给伙伴')}
 
     <div class="card">
@@ -346,8 +398,8 @@ function renderTeam() {
 function openAddMemberSheet() {
   const sheet = openSheet(`
     <h2 class="sheet-title">添加成员</h2>
-    <div class="field"><label>名 字</label><input type="text" id="f-mname" maxlength="6" placeholder="如：林晚"></div>
-    <button class="btn btn-primary" id="f-msave">添 入 队 中</button>
+    <div class="field"><label>名字</label><input type="text" id="f-mname" maxlength="6" placeholder="如：林晚"></div>
+    <button class="btn btn-primary" id="f-msave">${T('添入队中', '加入团队')}</button>
   `);
   const input = $('#f-mname', sheet);
   input.focus();
@@ -363,7 +415,7 @@ function openTeamNameSheet() {
   const sheet = openSheet(`
     <h2 class="sheet-title">队名</h2>
     <div class="field"><input type="text" id="f-tname" maxlength="12" value="${esc(store.get().teamName)}"></div>
-    <button class="btn btn-primary" id="f-tsave">改 定</button>
+    <button class="btn btn-primary" id="f-tsave">${T('改定', '保存')}</button>
   `);
   $('#f-tsave', sheet).addEventListener('click', () => {
     store.setTeamName($('#f-tname', sheet).value);
@@ -380,7 +432,7 @@ function renderMe() {
 
   page.innerHTML = `
     <header class="page-head">
-      <div class="eyebrow">我 的</div>
+      <div class="eyebrow">我的</div>
       <div class="me-head">
         <div class="me-avatar">${esc(st.profile.name[0] || '我')}</div>
         <div>
@@ -392,21 +444,30 @@ function renderMe() {
 
     <div class="card stat-trio">
       <div><b>${s.done}</b><span>累计完成</span></div>
-      <div><b>${s.days}</b><span>落笔之日</span></div>
-      <div><b>${st.members.length}</b><span>同行伙伴</span></div>
+      <div><b>${s.days}</b><span>${T('落笔之日', '活跃天数')}</span></div>
+      <div><b>${st.members.length}</b><span>${T('同行伙伴', '团队成员')}</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><b>界面风格</b></div>
+      <div class="seg" id="style-seg">
+        <button data-s="ink" class="${!isModern() ? 'on' : ''}">水墨 · 纸上</button>
+        <button data-s="modern" class="${isModern() ? 'on' : ''}">现代 · 案头</button>
+      </div>
     </div>
 
     <div class="card">
       <div class="card-title"><b>外观</b></div>
       <div class="seg" id="theme-seg">
         <button data-t="auto" class="${theme === 'auto' ? 'on' : ''}">随系统</button>
-        <button data-t="light" class="${theme === 'light' ? 'on' : ''}">宣纸</button>
-        <button data-t="dark" class="${theme === 'dark' ? 'on' : ''}">夜墨</button>
+        <button data-t="light" class="${theme === 'light' ? 'on' : ''}">${T('宣纸', '浅色')}</button>
+        <button data-t="dark" class="${theme === 'dark' ? 'on' : ''}">${T('夜墨', '深色')}</button>
       </div>
     </div>
 
     <div class="card cell-list">
       <div class="cell" id="cell-ziling"><span class="c-icon">灵</span><span class="c-label">去看看字灵</span><span class="c-value">它知道你今天的日程</span><span class="c-go">›</span></div>
+      <div class="cell" id="cell-zlset"><span class="c-icon">调</span><span class="c-label">字灵设置</span><span class="c-value">字体 · 字色 · AI</span><span class="c-go">›</span></div>
       <div class="cell" id="cell-export"><span class="c-icon">出</span><span class="c-label">导出数据</span><span class="c-value">JSON</span><span class="c-go">›</span></div>
       <div class="cell" id="cell-reseed"><span class="c-icon">还</span><span class="c-label">恢复示例数据</span><span class="c-go">›</span></div>
       <div class="cell danger" id="cell-clear"><span class="c-icon">空</span><span class="c-label">清空所有数据</span><span class="c-go">›</span></div>
@@ -422,12 +483,18 @@ function renderMe() {
     applyTheme();
     renderMe();
   }));
+  $('#style-seg', page).querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+    store.setUIStyle(b.dataset.s);
+    applyTheme();
+    renderMe();
+  }));
+  $('#cell-zlset', page).addEventListener('click', openZilingSettingsSheet);
   $('#me-name', page).addEventListener('click', () => {
     const sheet = openSheet(`
       <h2 class="sheet-title">改个名字</h2>
-      <div class="field"><label>名 字</label><input type="text" id="f-pname" maxlength="8" value="${esc(st.profile.name)}"></div>
-      <div class="field"><label>座 右 铭</label><input type="text" id="f-pmotto" maxlength="16" value="${esc(st.profile.motto)}"></div>
-      <button class="btn btn-primary" id="f-psave">就 这 样</button>
+      <div class="field"><label>名字</label><input type="text" id="f-pname" maxlength="8" value="${esc(st.profile.name)}"></div>
+      <div class="field"><label>座右铭</label><input type="text" id="f-pmotto" maxlength="16" value="${esc(st.profile.motto)}"></div>
+      <button class="btn btn-primary" id="f-psave">${T('就这样', '保存')}</button>
     `);
     $('#f-psave', sheet).addEventListener('click', () => {
       store.setProfile({ name: $('#f-pname', sheet).value.trim() || st.profile.name, motto: $('#f-pmotto', sheet).value.trim() || st.profile.motto });
@@ -451,18 +518,130 @@ function renderMe() {
       <b style="color:var(--ink)">字灵日程</b>是一个把日程管理与「汉字精灵」结合的小应用：
       成百上千个汉字聚散成形，陪你看完今天的待办，给你鼓励与安慰。<br><br>
       · 数据只存在你的浏览器本地（localStorage）<br>
-      · 中间的朱砂「灵」钮就是字灵的家：点它、拖它、双击它、和它说话<br>
+      · 中间的青瓷「灵」钮就是字灵的家：点它、拖它、双击它、和它说话<br>
       · 团队功能为本地演示，将来可接真实后端
     </p>
-    <button class="btn btn-ghost" onclick="document.getElementById('scrim').click()">好 的</button>
+    <button class="btn btn-ghost" onclick="document.getElementById('scrim').click()">好的</button>
   `));
+}
+
+/* ── 字灵设置（融合自字灵页原内建设置面板）──────────────────────
+ * 写的就是字灵自己的 localStorage 键（同源共享），改完通知 iframe 重放设置即时生效。
+ * 「外观深浅」不在此列：嵌入模式下字灵的底色/字色整体跟随 App 主题与调色板。
+ * 键名与 js/ui/settings.js、js/ai/bridge.js 保持一致。 */
+const ZLS = {
+  font: 'ziling.theme.font', color: 'ziling.theme.color', fx: 'ziling.theme.fx',
+  scale: 'ziling.origin.scale', persona: 'ziling.persona', memory: 'ziling.memory',
+  key: 'ziling.deepseek.key',
+};
+const ZL_FONTS = [
+  { label: '黑体', css: '"PingFang SC", "Microsoft YaHei", "Heiti SC", sans-serif' },
+  { label: '宋体', css: '"Songti SC", "SimSun", "STSong", serif' },
+  { label: '楷体', css: '"Kaiti SC", "KaiTi", "STKaiti", serif' },
+  { label: '圆体', css: '"Yuanti SC", "Microsoft YaHei", sans-serif' },
+];
+const ZL_FX = [{ label: '无', v: 'none' }, { label: '呼吸渐变', v: 'breathe' }, { label: '炫彩', v: 'rainbow' }];
+const lsGet = (k, d = '') => { try { return localStorage.getItem(k) ?? d; } catch { return d; } };
+const lsSet = (k, v) => { try { v == null || v === '' ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* */ } };
+
+function openZilingSettingsSheet() {
+  const cur = {
+    font: lsGet(ZLS.font, ZL_FONTS[0].css),
+    color: lsGet(ZLS.color),
+    fx: lsGet(ZLS.fx, 'none'),
+    scale: parseFloat(lsGet(ZLS.scale, '1')) || 1,
+    persona: lsGet(ZLS.persona),
+    memory: lsGet(ZLS.memory) !== '0',
+    hasKey: !!lsGet(ZLS.key),
+  };
+  const sheet = openSheet(`
+    <h2 class="sheet-title">字灵设置</h2>
+    <div class="field"><label>里字字体</label>
+      <div class="pick-row" id="z-fonts">
+        ${ZL_FONTS.map((f) => `<button class="pick ${cur.font === f.css ? 'on' : ''}" data-v="${esc(f.css)}">${f.label}</button>`).join('')}
+      </div></div>
+    <div class="field"><label>字色</label>
+      <div class="inline-row">
+        <input type="color" id="z-color" value="${cur.color || '#888888'}">
+        <button class="mini-btn" id="z-color-reset">跟随主题</button>
+        <span class="hint-text grow" id="z-color-state">${cur.color ? '自定义中' : '跟随主题'}</span>
+      </div></div>
+    <div class="field"><label>字色特效</label>
+      <div class="pick-row" id="z-fx">
+        ${ZL_FX.map((f) => `<button class="pick ${cur.fx === f.v ? 'on' : ''}" data-v="${f.v}">${f.label}</button>`).join('')}
+      </div></div>
+    <div class="field"><label>原态字号 <span id="z-scale-val">${cur.scale.toFixed(2)}×</span></label>
+      <input type="range" id="z-scale" min="0.7" max="1.6" step="0.05" value="${cur.scale}"></div>
+    <div class="field"><label>AI 风格（人设）</label>
+      <input type="text" id="z-persona" maxlength="40" placeholder="如：温柔 / 俏皮 / 古典文艺" value="${esc(cur.persona)}"></div>
+    <div class="field"><label>AI 记忆（带上下文对话）</label>
+      <div class="inline-row"><div class="toggle ${cur.memory ? 'on' : ''}" id="z-memory"></div>
+      <span class="hint-text grow">关闭后每句话都是新的开始</span></div></div>
+    <div class="field"><label>API Key（仅存本机，不上传）</label>
+      <div class="inline-row">
+        <input type="password" id="z-key" class="grow" placeholder="${cur.hasKey ? '已存（本机）' : 'DeepSeek key（可不填，用内置演示）'}" style="width:100%">
+        <button class="mini-btn" id="z-key-save">存</button>
+        <button class="mini-btn" id="z-key-clear">清</button>
+      </div></div>
+    <p class="hint-text">字灵的底色与深浅跟随 App 的「外观」与「界面风格」；改动即时生效。</p>
+    <button class="btn btn-ghost" id="z-done" style="margin-top:6px;">完成</button>
+  `);
+
+  const apply = () => refreshZilingSettings();
+  const wirePicks = (id, save) => $(id, sheet).querySelectorAll('.pick').forEach((b) => b.addEventListener('click', () => {
+    $(id, sheet).querySelectorAll('.pick').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    save(b.dataset.v);
+    apply();
+  }));
+  wirePicks('#z-fonts', (v) => lsSet(ZLS.font, v));
+  wirePicks('#z-fx', (v) => lsSet(ZLS.fx, v === 'none' ? '' : v));
+
+  $('#z-color', sheet).addEventListener('input', (e) => {
+    lsSet(ZLS.color, e.target.value);
+    $('#z-color-state', sheet).textContent = '自定义中';
+    apply();
+  });
+  $('#z-color-reset', sheet).addEventListener('click', () => {
+    lsSet(ZLS.color, '');
+    $('#z-color-state', sheet).textContent = '跟随主题';
+    apply();
+  });
+  $('#z-scale', sheet).addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    $('#z-scale-val', sheet).textContent = `${v.toFixed(2)}×`;
+    lsSet(ZLS.scale, String(v));
+    apply();
+  });
+  $('#z-persona', sheet).addEventListener('change', (e) => { lsSet(ZLS.persona, e.target.value.trim()); apply(); });
+  $('#z-memory', sheet).addEventListener('click', (e) => {
+    e.target.classList.toggle('on');
+    lsSet(ZLS.memory, e.target.classList.contains('on') ? '1' : '0');
+    apply();
+  });
+  $('#z-key-save', sheet).addEventListener('click', () => {
+    const v = $('#z-key', sheet).value.trim();
+    if (!v) { toast('先填入 key'); return; }
+    lsSet(ZLS.key, v);
+    $('#z-key', sheet).value = '';
+    $('#z-key', sheet).placeholder = '已存（本机）';
+    apply();
+    toast('已存到本机');
+  });
+  $('#z-key-clear', sheet).addEventListener('click', () => {
+    lsSet(ZLS.key, '');
+    $('#z-key', sheet).placeholder = 'DeepSeek key（可不填，用内置演示）';
+    apply();
+    toast('已清除');
+  });
+  $('#z-done', sheet).addEventListener('click', closeSheet);
 }
 
 function confirmSheet(title, desc, onYes) {
   const sheet = openSheet(`
     <h2 class="sheet-title">${esc(title)}</h2>
     <p style="font-size:13.5px; color:var(--ink-2); margin:0 2px 18px; line-height:1.7;">${esc(desc)}</p>
-    <button class="btn btn-danger-line" id="c-yes" style="margin-bottom:8px;">确 定</button>
+    <button class="btn btn-danger-line" id="c-yes" style="margin-bottom:8px;">确定</button>
     <button class="btn btn-ghost" id="c-no">再想想</button>
   `);
   $('#c-yes', sheet).addEventListener('click', () => { closeSheet(); onYes(); });
@@ -476,22 +655,22 @@ function openTaskSheet(editing = null) {
   const t = editing || { title: '', date: defDate, time: '', tag: 'work', assignee: 'me' };
 
   const sheet = openSheet(`
-    <h2 class="sheet-title">${editing ? '改一改' : '落 一 笔'}</h2>
-    <div class="field"><label>要 做 的 事</label>
-      <input type="text" id="f-title" maxlength="40" placeholder="写下一件具体的小事…" value="${esc(t.title)}"></div>
+    <h2 class="sheet-title">${editing ? T('改一改', '编辑任务') : T('落一笔', '新建任务')}</h2>
+    <div class="field"><label>${T('要做的事', '任务内容')}</label>
+      <input type="text" id="f-title" maxlength="40" placeholder="${T('写下一件具体的小事…', '输入任务内容…')}" value="${esc(t.title)}"></div>
     <div class="field-row">
-      <div class="field"><label>日 期</label><input type="date" id="f-date" value="${t.date}"></div>
-      <div class="field"><label>时 间（可空）</label><input type="time" id="f-time" value="${t.time}"></div>
+      <div class="field"><label>日期</label><input type="date" id="f-date" value="${t.date}"></div>
+      <div class="field"><label>时间（可空）</label><input type="time" id="f-time" value="${t.time}"></div>
     </div>
-    <div class="field"><label>标 签</label>
+    <div class="field"><label>标签</label>
       <div class="pick-row" id="f-tags">
         ${store.TAGS.map((g) => `<button class="pick ${t.tag === g.id ? 'on' : ''}" data-v="${g.id}">${g.name}</button>`).join('')}
       </div></div>
-    <div class="field"><label>交 给 谁</label>
+    <div class="field"><label>${T('交给谁', '负责人')}</label>
       <div class="pick-row" id="f-who">
         ${st.members.map((m) => `<button class="pick ${t.assignee === m.id ? 'on' : ''}" data-v="${m.id}">${avatar(m)}${esc(m.name)}</button>`).join('')}
       </div></div>
-    <button class="btn btn-primary" id="f-save">${editing ? '改 定' : '落 笔'}</button>
+    <button class="btn btn-primary" id="f-save">${editing ? T('改定', '保存') : T('落笔', '创建')}</button>
   `);
 
   let tag = t.tag, who = t.assignee;
@@ -509,8 +688,8 @@ function openTaskSheet(editing = null) {
     const title = titleInput.value.trim();
     if (!title) { toast('总得写点什么'); titleInput.focus(); return; }
     const data = { title, date: $('#f-date', sheet).value || store.todayStr(), time: $('#f-time', sheet).value, tag, assignee: who };
-    if (editing) { store.updateTask(editing.id, data); toast('已改定'); }
-    else { store.addTask(data); toast('已落笔'); }
+    if (editing) { store.updateTask(editing.id, data); toast(T('已改定', '已保存')); }
+    else { store.addTask(data); toast(T('已落笔', '已创建')); }
     closeSheet();
   });
 }
@@ -536,16 +715,58 @@ function openTaskDetail(id) {
       <button id="d-tomorrow"><span class="a-glyph">明</span>顺延一天</button>
       <button id="d-edit"><span class="a-glyph">改</span>编辑</button>
     </div>
-    <button class="btn btn-ghost" id="d-del" style="color:var(--seal); margin-top:14px;">删除这件事</button>
+    <button class="btn btn-ghost" id="d-del" style="color:var(--danger); margin-top:14px;">删除这件事</button>
   `);
-  $('#d-done', sheet).addEventListener('click', () => { const r = store.toggleDone(id); closeSheet(); if (r?.done) toast('完成一件，墨迹又添一笔 ✦'); });
+  $('#d-done', sheet).addEventListener('click', () => { const r = store.toggleDone(id); closeSheet(); if (r?.done) toast(T('完成一件，墨迹又添一笔 ✦', '已完成 ✓')); });
   $('#d-delay', sheet).addEventListener('click', () => { store.toggleDelayed(id); closeSheet(); });
   $('#d-tomorrow', sheet).addEventListener('click', () => { store.moveToTomorrow(id); closeSheet(); toast('已顺延到明天'); });
   $('#d-edit', sheet).addEventListener('click', () => openTaskSheet(t));
   $('#d-del', sheet).addEventListener('click', () => { store.removeTask(id); closeSheet(); toast('已删去'); });
 }
 
+/* ── 首次进入 · 界面风格选择 ────────────────────────────────── */
+function showStylePick() {
+  const el = document.createElement('div');
+  el.id = 'style-pick';
+  el.innerHTML = `
+    <div class="sp-eyebrow">初 次 见 面</div>
+    <h2>选一种你喜欢的样子</h2>
+    <div class="sp-sub">两种气质，同一副筋骨；之后随时可在「我的」里更换。</div>
+    <div class="style-card" data-s="ink">
+      <span class="sc-preview ink-mini">
+        <span class="pv-head">六月十日</span><span class="pv-seal"></span>
+        <span class="pv-line" style="top:38px"></span><span class="pv-line" style="top:60px"></span><span class="pv-line" style="top:82px; right:34px"></span>
+      </span>
+      <span class="sc-text">
+        <span class="sc-name">水墨 · 纸上</span>
+        <span class="sc-desc">宣纸、墨色与青瓷印，<br>把日子过成诗。</span>
+      </span>
+      <span class="sc-go">›</span>
+    </div>
+    <div class="style-card" data-s="modern">
+      <span class="sc-preview modern-mini">
+        <span class="pv-head">6月10日</span><span class="pv-seal"></span>
+        <span class="pv-line" style="top:38px"></span><span class="pv-line" style="top:60px"></span><span class="pv-line" style="top:82px; right:34px"></span>
+      </span>
+      <span class="sc-text">
+        <span class="sc-name">现代 · 案头</span>
+        <span class="sc-desc">利落的灰白与青瓷绿，<br>像一件称手的办公软件。</span>
+      </span>
+      <span class="sc-go">›</span>
+    </div>
+    <div class="sp-note">字灵在两种风格里都会陪着你</div>`;
+  $('#phone').appendChild(el);
+  requestAnimationFrame(() => el.classList.add('in'));
+  el.querySelectorAll('.style-card').forEach((c) => c.addEventListener('click', () => {
+    store.setUIStyle(c.dataset.s);
+    applyTheme();
+    renderers[current]();
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 520);
+  }));
+}
+
 /* ── 启动 ─────────────────────────────────────────────────── */
 go('today');
 // 字灵 iframe 懒加载：首次切到「灵」页时才唤醒，让用户亲眼看到它的苏醒动画。
-playSplash({ onDone: () => {} });
+playSplash({ onDone: () => { if (!store.get().settings.uiStyle) showStylePick(); } });
