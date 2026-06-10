@@ -1116,6 +1116,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // 暂停互动/对话/时钟/蛇/自动循环，画面交给游戏覆盖层。
     stopInteractiveLoop(); exitConversation(); stopClock(); stopSnake();
     inOrigin = false; originAnim = null; originHold = null; shapeActive = false;
+    resetDispScale();
     const overlay = document.getElementById('ui-overlay');
     const fontCss = loadSettings().font;
     gameInst = new WordMatch(overlay, {
@@ -1129,6 +1130,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // 原态 = 把现有里字按"正常文本行"居中排版钉住静止（带极轻微浮动增加生命感，收束 L28）。
   // 里字内容不变（动态里的里字本就来自原态文本）；动态↔原态都靠 PIBT 沿格子滑动，匀速美观
   // （华容道式，收束 L4/L29）。长按动态→原态；原态里点/双击/拖动→回到动态形状。
+  // 修复：凡是"绕过 toShape 过渡、直接清掉原态状态"的路径（拖动打断/进游戏/重排原态），
+  // 必须把每个字的 dispScale 复位，否则原态的放大字会带着 1.7× 混进动态 → 里字大小不一。
+  function resetDispScale() { for (const c of pool.getAll()) c.dispScale = 1; }
 
   // 动态 → 原态：里字数变化用**螺旋出入场**（多余的螺旋淡出、缺的螺旋淡入），与"圆聚→放大文本行"
   // 过渡同时进行 → 不再有里字突兀消失/出现。过渡只作用于"留下来的"那批里字。
@@ -1313,6 +1317,7 @@ document.addEventListener('DOMContentLoaded', () => {
     lastOriginText = text;
     setGlyphSource(content);   // 原态：里字内容 = 这句话的字
     inOrigin = false; originAnim = null; originHold = null;
+    resetDispScale();          // 直接重排（如日程流连续两轮原态）时，先复位上一轮的放大
     enterOrigin();
   }
 
@@ -1736,8 +1741,8 @@ document.addEventListener('DOMContentLoaded', () => {
     onDragStart(col, row, px, py) {
       if (intro.active) return;
       stopInteractiveLoop(); pauseConvoAuto();   // 对话态拖动 → 暂停自动推进，跟手环绕
-      if (originAnim) { originAnim = null; } // 拖动打断过渡，直接接管
-      if (inOrigin || originHold) { inOrigin = false; originHold = null; } // 原态→拖动：直接跟手环绕
+      if (originAnim) { originAnim = null; resetDispScale(); } // 拖动打断过渡，直接接管（复位放大）
+      if (inOrigin || originHold) { inOrigin = false; originHold = null; resetDispScale(); } // 原态→拖动：直接跟手环绕
       dragging = true;
       dragEnd = { col, row };
       orbitFinger = { x: px, y: py };

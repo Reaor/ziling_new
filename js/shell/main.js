@@ -5,6 +5,8 @@
  */
 
 import * as store from './store.js';
+import * as api from './api.js';
+import * as remind from './remind.js';
 import { playSplash } from './splash.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -82,17 +84,19 @@ $('#phone').appendChild(fab);
 /* ── 公共渲染小件 ─────────────────────────────────────────── */
 const avatar = (m, size = '') => `<span class="dot-avatar ${size}" style="background:${m.color}">${esc(m.name[0])}</span>`;
 
-function taskRow(t) {
+function taskRow(t, { showTeam = true } = {}) {
   const tag = store.TAGS.find((x) => x.id === t.tag);
-  const m = store.memberOf(t.assignee);
+  const m = store.memberOf(t.assignee, t.teamId);
+  const team = store.teamOf(t);
   const overdue = !t.done && t.date < store.todayStr();
   return `<div class="task ${t.done ? 'done' : ''} ${t.delayed || overdue ? 'delayed' : ''}" data-id="${t.id}">
     <span class="tick" data-act="tick">✓</span>
     <div class="t-main">
       <div class="t-title">${esc(t.title)}</div>
       <div class="t-meta">
-        ${t.time ? `<span class="chip time">${esc(t.time)}</span>` : ''}
+        ${t.time ? `<span class="chip time">${esc(t.time)}${t.remind && !t.done ? ' ⏰' : ''}</span>` : ''}
         ${tag ? `<span class="chip ${tag.cls}">${tag.name}</span>` : ''}
+        ${showTeam && team && store.teams().length > 1 ? `<span class="chip">${esc(team.name)}</span>` : ''}
         ${overdue ? `<span class="chip delay">逾期</span>` : t.delayed ? `<span class="chip delay">搁置</span>` : ''}
       </div>
     </div>
@@ -291,8 +295,10 @@ function openZiling() {
     zilingFrame.allow = 'clipboard-write';
     // embed=1 进入嵌入模式（按钮融入宿主风格、设置融入 App）；调色板与当日日程经 URL 首发，
     // 后续更新走 postMessage。
+    const payload = store.zilingPayload();
+    lastFedJSON = JSON.stringify(payload);   // URL 已带上首份日程，load 后不再重复推送同一份
     zilingFrame.src = `ziling.html?embed=1&pbg=${hex(p.bg)}&pfg=${hex(p.fg)}&pac=${hex(p.ac)}&pon=${hex(p.onAc)}`
-      + `&schedule=${encodeURIComponent(JSON.stringify(store.zilingPayload()))}`;
+      + `&schedule=${encodeURIComponent(lastFedJSON)}`;
     zilingFrame.addEventListener('load', () => {
       $('#ziling-loading')?.remove();
       feedZiling();
@@ -303,12 +309,18 @@ function openZiling() {
   }
 }
 
-let feedTimer = null;
+let feedTimer = null, lastFedJSON = '';
 function feedZiling() {
   if (!zilingFrame?.contentWindow) return;
   clearTimeout(feedTimer);
   feedTimer = setTimeout(() => {
-    try { zilingFrame.contentWindow.postMessage({ type: 'ziling:schedule', payload: store.zilingPayload() }, '*'); } catch { /* iframe 未就绪时忽略 */ }
+    // 只在日程内容真的变化时才推送：重复推送会让字灵反复重启"日程播报流"，
+    // 打断进行中的呈现（这正是此前"里字大小不一"高发的诱因之一）。
+    const payload = store.zilingPayload();
+    const j = JSON.stringify(payload);
+    if (j === lastFedJSON) return;
+    lastFedJSON = j;
+    try { zilingFrame.contentWindow.postMessage({ type: 'ziling:schedule', payload }, '*'); } catch { /* iframe 未就绪时忽略 */ }
   }, 400);
 }
 
@@ -321,8 +333,12 @@ function refreshZilingSettings() {
   try { zilingFrame?.contentWindow?.postMessage({ type: 'ziling:refreshSettings' }, '*'); } catch { /* ignore */ }
 }
 
-/* ════════════════════════════ 团队 ══════════════════════════ */
-let teamFilter = null;   // 按成员过滤任务；null = 全部
+/* ════════════════════════════ 团队 ══════════════════════════
+ * 本地模式：多团队（设备内演示，成员是名牌）。
+ * 联机模式（登录 zicodo 后）：服务器真实多人团队——6 位邀请码加入、成员/角色/积分、排行。 */
+let teamFilter = null;   // 本地：按成员过滤任务；null = 全部
+let srvTeams = null;     // 联机：我的团队列表缓存
+let srvSelected = null;  // 联机：当前查看的团队 id
 
 function relTime(ts) {
   const s = (Date.now() - ts) / 1000;
@@ -332,28 +348,48 @@ function relTime(ts) {
   return `${Math.floor(s / 86400)} 天前`;
 }
 
-function renderTeam() {
+function renderTeam() { api.isAuthed() ? renderTeamOnline() : renderTeamLocal(); }
+
+/* —— 团队切换条（两种模式共用样式） —— */
+const teamChips = (list, selId, extra = '') => `
+  <div class="member-strip team-strip">
+    ${list.map((t) => `
+      <div class="member-cell ${t.id === selId ? 'sel' : ''}" data-tid="${t.id}">
+        <span class="big-avatar" style="background:${t.id === selId ? 'var(--seal)' : 'var(--paper-3)'}; color:${t.id === selId ? 'var(--on-accent)' : 'var(--ink-2)'}">${esc(t.name[0])}</span>
+        <span class="m-name">${esc(t.name)}</span>
+      </div>`).join('')}
+    ${extra}
+  </div>`;
+
+function renderTeamLocal() {
   const page = $('#page-team');
   const st = store.get();
-  const stats = store.weekStats();
+  const team = store.currentTeam();
+  const stats = store.weekStats(team.id);
+  const memberIds = new Set(team.members.map((m) => m.id));
+  if (teamFilter && !memberIds.has(teamFilter)) teamFilter = null;
   const teamTasks = st.tasks
-    .filter((t) => !teamFilter || t.assignee === teamFilter)
+    .filter((t) => t.teamId === team.id && (!teamFilter || t.assignee === teamFilter))
     .slice()
     .sort((a, b) => (a.done - b.done) || a.date.localeCompare(b.date))
     .slice(0, 30);
+  const feed = st.feed.filter((f) => f.teamId === team.id);
 
   page.innerHTML = `
     <header class="page-head">
       <div class="eyebrow">${T('同舟共济', '团队协作')}</div>
-      <h1 id="team-name">${esc(st.teamName)}</h1>
-      <div class="sub">${st.members.length} 位成员 · 轻触队名可改 · 任务可指派给任何人</div>
+      <h1 id="team-name">${esc(team.name)}</h1>
+      <div class="sub">${st.teams.length} 个团队 · ${team.members.length} 位成员 · 轻触队名可改/解散 · 登录后可与真人组队</div>
     </header>
+
+    ${teamChips(st.teams, team.id, `
+      <div class="member-cell add-cell" id="add-team"><span class="big-avatar">+</span><span class="m-name">新团队</span></div>`)}
 
     <div class="member-strip">
       <div class="member-cell ${!teamFilter ? 'sel' : ''}" data-mid="">
         <span class="big-avatar" style="background:var(--ink)">众</span><span class="m-name">全部</span>
       </div>
-      ${st.members.map((m) => `
+      ${team.members.map((m) => `
         <div class="member-cell ${teamFilter === m.id ? 'sel' : ''}" data-mid="${m.id}">
           <span class="big-avatar" style="background:${m.color}">${esc(m.name[0])}</span>
           <span class="m-name">${esc(m.name)}</span>
@@ -373,12 +409,12 @@ function renderTeam() {
         </div>`).join('')}
     </div>
 
-    <div class="group-label">${teamFilter ? esc(store.memberOf(teamFilter).name) + ' 的任务' : '团队任务'}<span class="cnt">${teamTasks.length}</span></div>
-    ${teamTasks.length ? teamTasks.map(taskRow).join('') : emptyBlock('和', '暂无任务<br>去「今日」页新建并指派给伙伴')}
+    <div class="group-label">${teamFilter ? esc(store.memberOf(teamFilter, team.id).name) + ' 的任务' : '团队任务'}<span class="cnt">${teamTasks.length}</span></div>
+    ${teamTasks.length ? teamTasks.map((t) => taskRow(t, { showTeam: false })).join('') : emptyBlock('和', '暂无任务<br>去「今日」页新建并指派给伙伴')}
 
     <div class="card">
       <div class="card-title"><b>团队动态</b></div>
-      ${st.feed.slice(0, 8).map((f) => `
+      ${feed.slice(0, 8).map((f) => `
         <div class="feed-item">
           <div class="f-text"><b>${esc(f.who)}</b> ${esc(f.text)}</div>
           <div class="f-time">${relTime(f.ts)}</div>
@@ -386,6 +422,11 @@ function renderTeam() {
     </div>
   `;
 
+  page.querySelectorAll('[data-tid]').forEach((c) => c.addEventListener('click', () => {
+    store.setCurrentTeam(c.dataset.tid);
+    teamFilter = null;
+  }));
+  $('#add-team', page).addEventListener('click', openAddTeamSheet);
   page.querySelectorAll('.member-cell[data-mid]').forEach((c) => c.addEventListener('click', () => {
     teamFilter = c.dataset.mid || null;
     renderTeam();
@@ -395,10 +436,27 @@ function renderTeam() {
   bindTaskRows(page);
 }
 
+function openAddTeamSheet() {
+  const sheet = openSheet(`
+    <h2 class="sheet-title">新建团队</h2>
+    <div class="field"><label>队名</label><input type="text" id="f-team" maxlength="12" placeholder="如：晨跑搭子"></div>
+    <button class="btn btn-primary" id="f-tsave">建 队</button>
+  `);
+  $('#f-team', sheet).focus();
+  $('#f-tsave', sheet).addEventListener('click', () => {
+    const name = $('#f-team', sheet).value.trim();
+    if (!name) { toast('给团队起个名字'); return; }
+    store.addTeam(name);
+    closeSheet();
+    toast(`「${name}」建好了`);
+  });
+}
+
 function openAddMemberSheet() {
   const sheet = openSheet(`
     <h2 class="sheet-title">添加成员</h2>
     <div class="field"><label>名字</label><input type="text" id="f-mname" maxlength="6" placeholder="如：林晚"></div>
+    <p class="hint-text" style="margin:0 2px 14px;">本地模式的成员是"名牌"，方便指派与统计；登录后可邀请真实用户。</p>
     <button class="btn btn-primary" id="f-msave">${T('添入队中', '加入团队')}</button>
   `);
   const input = $('#f-mname', sheet);
@@ -412,14 +470,168 @@ function openAddMemberSheet() {
 }
 
 function openTeamNameSheet() {
+  const team = store.currentTeam();
+  const canRemove = store.teams().length > 1;
   const sheet = openSheet(`
     <h2 class="sheet-title">队名</h2>
-    <div class="field"><input type="text" id="f-tname" maxlength="12" value="${esc(store.get().teamName)}"></div>
-    <button class="btn btn-primary" id="f-tsave">${T('改定', '保存')}</button>
+    <div class="field"><input type="text" id="f-tname" maxlength="12" value="${esc(team.name)}"></div>
+    <button class="btn btn-primary" id="f-tsave" style="margin-bottom:8px;">${T('改定', '保存')}</button>
+    ${canRemove ? '<button class="btn btn-danger-line" id="f-tdel">解散这个团队</button>' : ''}
   `);
   $('#f-tsave', sheet).addEventListener('click', () => {
-    store.setTeamName($('#f-tname', sheet).value);
+    store.renameTeam(team.id, $('#f-tname', sheet).value);
     closeSheet();
+  });
+  $('#f-tdel', sheet)?.addEventListener('click', () => {
+    closeSheet();
+    confirmSheet(`解散「${team.name}」？`, '该团队的任务与动态会一并删除。', () => { store.removeTeam(team.id); toast('已解散'); });
+  });
+}
+
+/* —— 联机模式：zicodo 服务器团队 —— */
+async function renderTeamOnline() {
+  const page = $('#page-team');
+  const my = api.currentUser();
+  page.innerHTML = `
+    <header class="page-head">
+      <div class="eyebrow">${T('同舟共济', '团队协作')}</div>
+      <h1>团队</h1>
+      <div class="sub">联机模式 · ${esc(my?.nickname || my?.username || '')} · 邀请码与真人组队</div>
+    </header>
+    <div class="empty"><span class="e-glyph">候</span>正在取回你的团队…</div>`;
+
+  try {
+    if (!srvTeams) srvTeams = await api.listTeams();
+  } catch (e) {
+    page.querySelector('.empty').innerHTML = `<span class="e-glyph">断</span>${esc(e.message)}<br><button class="mini-btn" id="t-retry" style="margin-top:10px;">重试</button>`;
+    $('#t-retry', page)?.addEventListener('click', () => { srvTeams = null; renderTeam(); });
+    return;
+  }
+  if (current !== 'team') return;
+
+  if (!srvTeams.length) {
+    page.innerHTML = `
+      <header class="page-head">
+        <div class="eyebrow">${T('同舟共济', '团队协作')}</div>
+        <h1>团队</h1>
+        <div class="sub">联机模式 · 还没加入任何团队</div>
+      </header>
+      <div class="card" style="text-align:center; padding:28px 16px;">
+        <div class="empty" style="padding:0 0 18px;"><span class="e-glyph">聚</span>建一个队，或用伙伴分享的 6 位邀请码加入</div>
+        <button class="btn btn-primary" id="t-create" style="margin-bottom:10px;">创建团队</button>
+        <button class="btn btn-ghost" id="t-join">输入邀请码加入</button>
+      </div>`;
+    $('#t-create', page).addEventListener('click', openSrvCreateSheet);
+    $('#t-join', page).addEventListener('click', openSrvJoinSheet);
+    return;
+  }
+
+  if (!srvSelected || !srvTeams.find((t) => t.id === srvSelected)) srvSelected = srvTeams[0].id;
+  let team;
+  try { team = await api.teamDetail(srvSelected); }
+  catch { team = srvTeams.find((t) => t.id === srvSelected); }
+  if (current !== 'team') return;
+  const isLeader = team.leaderId === my?.id;
+  const members = team.members || [];
+  const maxPts = Math.max(1, ...members.map((m) => m.totalPoints || 0));
+
+  page.innerHTML = `
+    <header class="page-head">
+      <div class="eyebrow">${T('同舟共济', '团队协作')}</div>
+      <h1>${esc(team.name)}</h1>
+      <div class="sub">联机模式 · ${members.length}/${team.maxMembers || 10} 人 · ${isLeader ? '你是组长' : '成员'}</div>
+    </header>
+
+    ${teamChips(srvTeams, srvSelected, `
+      <div class="member-cell add-cell" id="srv-create"><span class="big-avatar">+</span><span class="m-name">建队</span></div>
+      <div class="member-cell add-cell" id="srv-join"><span class="big-avatar">码</span><span class="m-name">加入</span></div>`)}
+
+    <div class="card" style="display:flex; align-items:center; gap:14px;">
+      <div style="flex:1;">
+        <div class="card-title" style="margin-bottom:4px;"><b>邀请码</b></div>
+        <div class="hint-text">把这串数字发给伙伴，TA 在「团队 → 加入」里输入即可</div>
+      </div>
+      <b id="invite-code" style="font-size:26px; letter-spacing:.18em; font-variant-numeric:tabular-nums; color:var(--seal-deep); cursor:pointer;">${esc(team.inviteCode || '——')}</b>
+    </div>
+
+    <div class="card">
+      <div class="card-title"><b>成员</b><span class="more">按积分</span></div>
+      ${members.slice().sort((a, b) => (b.totalPoints || 0) - (a.totalPoints || 0)).map((m) => `
+        <div class="stat-row">
+          <span class="s-name" style="width:84px;"><span class="dot-avatar" style="background:${m.id === my?.id ? 'var(--seal)' : 'var(--cyan)'}; color:${m.id === my?.id ? 'var(--on-accent)' : '#fff'}">${esc((m.nickname || m.username || '?')[0])}</span>${esc(m.nickname || m.username)}</span>
+          <span class="stat-bar"><i style="width:${((m.totalPoints || 0) / maxPts) * 100}%"></i></span>
+          <span class="s-num">${m.totalPoints || 0}分${m.role === '组长' ? ' · 长' : ''}</span>
+        </div>`).join('')}
+    </div>
+
+    <div class="card" id="rank-card">
+      <div class="card-title"><b>团队排行</b><span class="more">全服 · 按总积分</span></div>
+      <div class="hint-text">加载中…</div>
+    </div>
+
+    <button class="btn btn-danger-line" id="srv-leave" style="margin:4px 0 20px;">${isLeader ? '解散团队（组长退出即解散）' : '退出这个团队'}</button>
+  `;
+
+  page.querySelectorAll('[data-tid]').forEach((c) => c.addEventListener('click', () => { srvSelected = c.dataset.tid; renderTeam(); }));
+  $('#srv-create', page).addEventListener('click', openSrvCreateSheet);
+  $('#srv-join', page).addEventListener('click', openSrvJoinSheet);
+  $('#invite-code', page).addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(team.inviteCode); toast('邀请码已复制'); } catch { toast(`邀请码：${team.inviteCode}`); }
+  });
+  $('#srv-leave', page).addEventListener('click', () => confirmSheet(
+    isLeader ? `解散「${team.name}」？` : `退出「${team.name}」？`,
+    isLeader ? '你是组长：退出会解散整个团队，所有成员都会被移出。' : '之后可凭邀请码再加入。',
+    async () => {
+      try { await api.leaveTeam(team.id); srvTeams = null; srvSelected = null; renderTeam(); toast('已退出'); }
+      catch (e) { toast(e.message); }
+    }));
+  api.teamRanking().then((list) => {
+    const card = $('#rank-card', page);
+    if (!card) return;
+    card.innerHTML = `<div class="card-title"><b>团队排行</b><span class="more">全服 · 按总积分</span></div>`
+      + (list || []).slice(0, 5).map((r) => `
+        <div class="stat-row">
+          <span class="s-name" style="width:auto; flex:1;">${r.rank}. ${esc(r.name)}${r.id === team.id ? ' ←' : ''}</span>
+          <span class="s-num" style="width:auto;">${r.totalPoints || 0} 分 · ${r.memberCount}人</span>
+        </div>`).join('');
+  }).catch(() => { $('#rank-card', page)?.remove(); });
+}
+
+function openSrvCreateSheet() {
+  const sheet = openSheet(`
+    <h2 class="sheet-title">创建团队</h2>
+    <div class="field"><label>队名</label><input type="text" id="f-sname" maxlength="20" placeholder="2~50 个字符"></div>
+    <button class="btn btn-primary" id="f-screate">创 建</button>
+  `);
+  $('#f-sname', sheet).focus();
+  $('#f-screate', sheet).addEventListener('click', async () => {
+    const name = $('#f-sname', sheet).value.trim();
+    if (name.length < 2) { toast('队名至少 2 个字'); return; }
+    try {
+      const team = await api.createTeam(name);
+      srvTeams = null; srvSelected = team.id;
+      closeSheet(); renderTeam();
+      toast(`建好了，邀请码 ${team.inviteCode}`);
+    } catch (e) { toast(e.message); }
+  });
+}
+
+function openSrvJoinSheet() {
+  const sheet = openSheet(`
+    <h2 class="sheet-title">加入团队</h2>
+    <div class="field"><label>6 位邀请码</label><input type="text" id="f-code" maxlength="6" inputmode="numeric" placeholder="向队长要一串 6 位数字"></div>
+    <button class="btn btn-primary" id="f-join">加 入</button>
+  `);
+  $('#f-code', sheet).focus();
+  $('#f-join', sheet).addEventListener('click', async () => {
+    const code = $('#f-code', sheet).value.trim();
+    if (!/^\d{6}$/.test(code)) { toast('邀请码是 6 位数字'); return; }
+    try {
+      const team = await api.joinTeam(code);
+      srvTeams = null; srvSelected = team.id;
+      closeSheet(); renderTeam();
+      toast(`已加入「${team.name}」`);
+    } catch (e) { toast(e.message); }
   });
 }
 
@@ -445,7 +657,16 @@ function renderMe() {
     <div class="card stat-trio">
       <div><b>${s.done}</b><span>累计完成</span></div>
       <div><b>${s.days}</b><span>${T('落笔之日', '活跃天数')}</span></div>
-      <div><b>${st.members.length}</b><span>${T('同行伙伴', '团队成员')}</span></div>
+      <div><b>${st.teams.length}</b><span>${T('同行团队', '我的团队')}</span></div>
+    </div>
+
+    <div class="card cell-list">
+      ${api.isAuthed() ? `
+        <div class="cell" id="cell-account"><span class="c-icon">账</span><span class="c-label">${esc(api.currentUser()?.nickname || api.currentUser()?.username || '已登录')}</span><span class="c-value">联机模式 · 轻触管理</span><span class="c-go">›</span></div>
+      ` : `
+        <div class="cell" id="cell-account"><span class="c-icon">账</span><span class="c-label">登录 / 注册</span><span class="c-value">本地模式 · 登录后云同步</span><span class="c-go">›</span></div>
+      `}
+      <div class="cell" id="cell-notify"><span class="c-icon">铃</span><span class="c-label">提醒与通知</span><span class="c-value">${remind.permissionState() === 'granted' ? '已授权' : '应用内响铃'}</span><span class="c-go">›</span></div>
     </div>
 
     <div class="card">
@@ -489,6 +710,8 @@ function renderMe() {
     renderMe();
   }));
   $('#cell-zlset', page).addEventListener('click', openZilingSettingsSheet);
+  $('#cell-account', page).addEventListener('click', openAccountSheet);
+  $('#cell-notify', page).addEventListener('click', openNotifySheet);
   $('#me-name', page).addEventListener('click', () => {
     const sheet = openSheet(`
       <h2 class="sheet-title">改个名字</h2>
@@ -523,6 +746,109 @@ function renderMe() {
     </p>
     <button class="btn btn-ghost" onclick="document.getElementById('scrim').click()">好的</button>
   `));
+}
+
+/* ── 账户（zicodo 登录注册）────────────────────────────────── */
+function openAccountSheet() {
+  if (api.isAuthed()) {
+    const u = api.currentUser() || {};
+    const sheet = openSheet(`
+      <h2 class="sheet-title">账户</h2>
+      <div class="cell-list" style="margin-bottom:14px;">
+        <div class="cell"><span class="c-icon">名</span><span class="c-label">${esc(u.nickname || u.username)}</span><span class="c-value">@${esc(u.username || '')}</span></div>
+        <div class="cell"><span class="c-icon">分</span><span class="c-label">总积分</span><span class="c-value">${u.totalPoints ?? 0}</span></div>
+        <div class="cell"><span class="c-icon">服</span><span class="c-label">服务器</span><span class="c-value" style="max-width:170px; overflow:hidden; text-overflow:ellipsis;">${esc(api.getBase())}</span></div>
+      </div>
+      <button class="btn btn-primary" id="a-sync" style="margin-bottom:8px;">立即同步任务</button>
+      <button class="btn btn-danger-line" id="a-logout">退出登录</button>
+    `);
+    $('#a-sync', sheet).addEventListener('click', async () => {
+      try { await api.pullTasks(); closeSheet(); toast('已同步'); } catch (e) { toast(e.message); }
+    });
+    $('#a-logout', sheet).addEventListener('click', () => {
+      api.logout(); srvTeams = null; srvSelected = null;
+      closeSheet(); renderers[current]();
+      toast('已退出，回到本地模式');
+    });
+    return;
+  }
+
+  const sheet = openSheet(`
+    <h2 class="sheet-title">登录 zicodo</h2>
+    <div class="field"><label>服务器地址</label>
+      <input type="text" id="a-base" placeholder="https://你的服务器" value="${esc(api.getBase())}"></div>
+    <div class="field"><label>用户名 / 邮箱</label><input type="text" id="a-user" maxlength="50" autocomplete="username"></div>
+    <div class="field"><label>密码（注册需 ≥6 位）</label><input type="password" id="a-pass" maxlength="64" autocomplete="current-password"></div>
+    <div class="field" id="a-nick-row" style="display:none;"><label>昵称（可选）</label><input type="text" id="a-nick" maxlength="20"></div>
+    <button class="btn btn-primary" id="a-login" style="margin-bottom:8px;">登 录</button>
+    <button class="btn btn-ghost" id="a-reg">还没账号？注册一个</button>
+    <button class="btn btn-ghost" id="a-guest">游客一键体验（随机账号）</button>
+    <p class="hint-text" style="margin:8px 2px 0;">不登录也能用：数据存在本机。登录后任务云同步、可与真人组队、字灵直连后端 AI。</p>
+  `);
+  let mode = 'login';
+  const baseOf = () => $('#a-base', sheet).value.trim().replace(/\/$/, '');
+  $('#a-reg', sheet).addEventListener('click', () => {
+    mode = mode === 'login' ? 'register' : 'login';
+    $('#a-nick-row', sheet).style.display = mode === 'register' ? '' : 'none';
+    $('#a-login', sheet).textContent = mode === 'register' ? '注 册' : '登 录';
+    $('#a-reg', sheet).textContent = mode === 'register' ? '已有账号？去登录' : '还没账号？注册一个';
+  });
+  const finish = (u) => {
+    srvTeams = null; srvSelected = null;
+    closeSheet(); renderers[current]();
+    toast(`欢迎，${u.nickname || u.username}`);
+    api.pullTasks().catch(() => {});
+  };
+  $('#a-login', sheet).addEventListener('click', async () => {
+    const base = baseOf();
+    if (!/^https?:\/\//.test(base)) { toast('先填服务器地址（http/https）'); return; }
+    api.setBase(base);
+    const username = $('#a-user', sheet).value.trim();
+    const password = $('#a-pass', sheet).value;
+    if (!username || !password) { toast('用户名和密码都要填'); return; }
+    try {
+      const u = mode === 'register'
+        ? await api.register({ username, password, nickname: $('#a-nick', sheet).value.trim() })
+        : await api.login({ username, password });
+      finish(u);
+    } catch (e) { toast(e.message); }
+  });
+  $('#a-guest', sheet).addEventListener('click', async () => {
+    const base = baseOf();
+    if (!/^https?:\/\//.test(base)) { toast('先填服务器地址（http/https）'); return; }
+    api.setBase(base);
+    try { finish(await api.autoLogin()); } catch (e) { toast(e.message); }
+  });
+}
+
+/* ── 提醒与通知设置 ─────────────────────────────────────────── */
+function openNotifySheet() {
+  const st = store.get();
+  const perm = remind.permissionState();
+  const permText = { granted: '已授权（后台也能弹通知）', denied: '已被拒绝（去浏览器设置里开启）', default: '未授权', unsupported: '当前环境不支持' }[perm];
+  const sheet = openSheet(`
+    <h2 class="sheet-title">提醒与通知</h2>
+    <div class="field"><label>提醒声音</label>
+      <div class="inline-row"><div class="toggle ${st.settings.remindSound ? 'on' : ''}" id="n-sound"></div>
+      <span class="hint-text grow">到点响一段青瓷三连音</span></div></div>
+    <div class="field"><label>系统通知</label>
+      <div class="inline-row">
+        <button class="mini-btn" id="n-perm" ${perm === 'granted' || perm === 'unsupported' ? 'disabled' : ''}>申请授权</button>
+        <span class="hint-text grow">${permText}</span>
+      </div></div>
+    <p class="hint-text" style="margin:4px 2px 14px;">提醒在新建/编辑任务时按条开启（需选时间）。说明：网页应用在进程被杀后无法响铃；添加到主屏幕并保持后台可大幅提高可靠性。</p>
+    <button class="btn btn-ghost" id="n-done">好的</button>
+  `);
+  $('#n-sound', sheet).addEventListener('click', (e) => {
+    e.target.classList.toggle('on');
+    store.setRemindSound(e.target.classList.contains('on'));
+  });
+  $('#n-perm', sheet).addEventListener('click', async () => {
+    const r = await remind.requestPermission();
+    toast(r === 'granted' ? '已授权' : '未授权');
+    closeSheet();
+  });
+  $('#n-done', sheet).addEventListener('click', closeSheet);
 }
 
 /* ── 字灵设置（融合自字灵页原内建设置面板）──────────────────────
@@ -652,7 +978,8 @@ function confirmSheet(title, desc, onYes) {
 function openTaskSheet(editing = null) {
   const st = store.get();
   const defDate = current === 'calendar' ? calSelected : store.todayStr();
-  const t = editing || { title: '', date: defDate, time: '', tag: 'work', assignee: 'me' };
+  const t = editing || { title: '', date: defDate, time: '', tag: 'work', assignee: 'me', teamId: st.currentTeamId, remind: false };
+  let teamId = t.teamId || st.currentTeamId;
 
   const sheet = openSheet(`
     <h2 class="sheet-title">${editing ? T('改一改', '编辑任务') : T('落一笔', '新建任务')}</h2>
@@ -662,32 +989,65 @@ function openTaskSheet(editing = null) {
       <div class="field"><label>日期</label><input type="date" id="f-date" value="${t.date}"></div>
       <div class="field"><label>时间（可空）</label><input type="time" id="f-time" value="${t.time}"></div>
     </div>
+    <div class="field"><label>准点提醒</label>
+      <div class="inline-row">
+        <div class="toggle ${t.remind ? 'on' : ''}" id="f-remind"></div>
+        <span class="hint-text grow" id="f-remind-hint">${t.time ? '到点响铃提醒（应用开启时）' : '先选一个时间，才能提醒'}</span>
+      </div></div>
     <div class="field"><label>标签</label>
       <div class="pick-row" id="f-tags">
         ${store.TAGS.map((g) => `<button class="pick ${t.tag === g.id ? 'on' : ''}" data-v="${g.id}">${g.name}</button>`).join('')}
       </div></div>
-    <div class="field"><label>${T('交给谁', '负责人')}</label>
-      <div class="pick-row" id="f-who">
-        ${st.members.map((m) => `<button class="pick ${t.assignee === m.id ? 'on' : ''}" data-v="${m.id}">${avatar(m)}${esc(m.name)}</button>`).join('')}
+    <div class="field"><label>团队</label>
+      <div class="pick-row" id="f-team">
+        ${st.teams.map((x) => `<button class="pick ${teamId === x.id ? 'on' : ''}" data-v="${x.id}">${esc(x.name)}</button>`).join('')}
       </div></div>
+    <div class="field"><label>${T('交给谁', '负责人')}</label>
+      <div class="pick-row" id="f-who"></div></div>
     <button class="btn btn-primary" id="f-save">${editing ? T('改定', '保存') : T('落笔', '创建')}</button>
   `);
 
-  let tag = t.tag, who = t.assignee;
+  let tag = t.tag, who = t.assignee, remindOn = !!t.remind;
   const wirePicks = (id, set) => $(id, sheet).querySelectorAll('.pick').forEach((b) => b.addEventListener('click', () => {
     $(id, sheet).querySelectorAll('.pick').forEach((x) => x.classList.remove('on'));
     b.classList.add('on');
     set(b.dataset.v);
   }));
+  // 负责人列表随所选团队联动重建
+  const renderWho = () => {
+    const team = st.teams.find((x) => x.id === teamId) || st.teams[0];
+    if (!team.members.find((m) => m.id === who)) who = 'me';
+    $('#f-who', sheet).innerHTML = team.members
+      .map((m) => `<button class="pick ${who === m.id ? 'on' : ''}" data-v="${m.id}">${avatar(m)}${esc(m.name)}</button>`).join('');
+    wirePicks('#f-who', (v) => (who = v));
+  };
+  renderWho();
   wirePicks('#f-tags', (v) => (tag = v));
-  wirePicks('#f-who', (v) => (who = v));
+  wirePicks('#f-team', (v) => { teamId = v; renderWho(); });
+
+  const remindToggle = $('#f-remind', sheet);
+  const timeInput = $('#f-time', sheet);
+  remindToggle.addEventListener('click', async () => {
+    if (!timeInput.value) { toast('先选一个时间'); return; }
+    remindOn = !remindOn;
+    remindToggle.classList.toggle('on', remindOn);
+    if (remindOn) {
+      const p = await remind.requestPermission();
+      $('#f-remind-hint', sheet).textContent = p === 'granted' ? '到点响铃 + 系统通知' : '到点响铃提醒（应用开启时）';
+    }
+  });
+  timeInput.addEventListener('input', () => {
+    if (!timeInput.value) { remindOn = false; remindToggle.classList.remove('on'); }
+    $('#f-remind-hint', sheet).textContent = timeInput.value ? '到点响铃提醒（应用开启时）' : '先选一个时间，才能提醒';
+  });
+
   const titleInput = $('#f-title', sheet);
   if (!editing) titleInput.focus();
 
   $('#f-save', sheet).addEventListener('click', () => {
     const title = titleInput.value.trim();
     if (!title) { toast('总得写点什么'); titleInput.focus(); return; }
-    const data = { title, date: $('#f-date', sheet).value || store.todayStr(), time: $('#f-time', sheet).value, tag, assignee: who };
+    const data = { title, date: $('#f-date', sheet).value || store.todayStr(), time: timeInput.value, tag, assignee: who, teamId, remind: remindOn && !!timeInput.value };
     if (editing) { store.updateTask(editing.id, data); toast(T('已改定', '已保存')); }
     else { store.addTask(data); toast(T('已落笔', '已创建')); }
     closeSheet();
@@ -697,7 +1057,8 @@ function openTaskSheet(editing = null) {
 function openTaskDetail(id) {
   const t = store.get().tasks.find((x) => x.id === id);
   if (!t) return;
-  const m = store.memberOf(t.assignee);
+  const m = store.memberOf(t.assignee, t.teamId);
+  const team = store.teamOf(t);
   const tag = store.TAGS.find((x) => x.id === t.tag);
   const dateLabel = new Date(t.date + 'T00:00:00').toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'short' });
 
@@ -705,8 +1066,9 @@ function openTaskDetail(id) {
     <h2 class="sheet-title" style="margin-bottom:8px;">${esc(t.title)}</h2>
     <div class="t-meta" style="margin: 0 2px 16px;">
       <span class="chip">${dateLabel}</span>
-      ${t.time ? `<span class="chip time">${esc(t.time)}</span>` : ''}
+      ${t.time ? `<span class="chip time">${esc(t.time)}${t.remind ? ' ⏰' : ''}</span>` : ''}
       ${tag ? `<span class="chip ${tag.cls}">${tag.name}</span>` : ''}
+      ${team ? `<span class="chip">${esc(team.name)}</span>` : ''}
       <span class="chip">${esc(m.name)}</span>
     </div>
     <div class="action-grid">
@@ -766,7 +1128,38 @@ function showStylePick() {
   }));
 }
 
+/* ── 闹钟卡片（提醒到点时从顶部落下） ─────────────────────────── */
+function showAlarm(task) {
+  document.querySelector('.alarm-card')?.remove();
+  const el = document.createElement('div');
+  el.className = 'alarm-card';
+  el.innerHTML = `
+    <span class="seal-avatar" style="width:38px;height:38px;font-size:20px;flex:none;">铃</span>
+    <div class="a-body">
+      <i>${esc(task.time)} · 到点了</i>
+      <p>${esc(task.title)}</p>
+    </div>
+    <div class="a-actions">
+      <button data-a="done">完成</button>
+      <button data-a="snooze">+10分</button>
+      <button data-a="ok">知道了</button>
+    </div>`;
+  $('#phone').appendChild(el);
+  requestAnimationFrame(() => el.classList.add('in'));
+  const close = () => { el.classList.remove('in'); setTimeout(() => el.remove(), 350); };
+  el.querySelector('[data-a="done"]').addEventListener('click', () => { store.toggleDone(task.id); close(); toast(T('完成一件，墨迹又添一笔 ✦', '已完成 ✓')); });
+  el.querySelector('[data-a="snooze"]').addEventListener('click', () => { remind.snooze(task.id, 10); close(); toast('10 分钟后再提醒'); });
+  el.querySelector('[data-a="ok"]').addEventListener('click', close);
+  setTimeout(() => { if (el.isConnected) close(); }, 30000);
+}
+
 /* ── 启动 ─────────────────────────────────────────────────── */
+store.setSync(api.syncHandler);                 // 登录后任务操作镜像到 zicodo
+api.restoreSession().then((user) => { if (user && current !== 'ziling') renderers[current](); });
+remind.init({ onFire: showAlarm });             // 任务提醒/闹钟
+if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
+  addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
 go('today');
 // 字灵 iframe 懒加载：首次切到「灵」页时才唤醒，让用户亲眼看到它的苏醒动画。
 playSplash({ onDone: () => { if (!store.get().settings.uiStyle) showStylePick(); } });

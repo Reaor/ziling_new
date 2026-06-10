@@ -1,7 +1,8 @@
 /**
- * 字灵日程 · 数据层
- * localStorage 持久化：任务 / 团队成员 / 团队动态 / 个人资料 / 偏好。
- * 纯前端可用（部署在静态站点即真实可用）；将来接后端时替换此层即可。
+ * 字灵日程 · 数据层 v2
+ * localStorage 持久化：多团队 / 任务(含提醒) / 团队动态 / 个人资料 / 偏好。
+ * 纯前端可用（静态部署即真实可用）；登录后由 api.js 同步到 zicodo 后端，本层仍是 UI 的事实来源。
+ * v1 → v2 迁移：单团队(teamName+members) 包装成 teams[0]，任务补 teamId。
  */
 
 const KEY = 'zlapp.v1';
@@ -25,35 +26,56 @@ function seed() {
   const t = todayStr();
   const d = new Date(); d.setDate(d.getDate() + 1); const tm = todayStr(d);
   d.setDate(d.getDate() + 2); const t3 = todayStr(d);
-  const members = [
-    { id: 'me',  name: '我',   color: MEMBER_COLORS[0] },
-    { id: uid(), name: '沈书', color: MEMBER_COLORS[1] },
-    { id: uid(), name: '林晚', color: MEMBER_COLORS[2] },
-    { id: uid(), name: '苏砚', color: MEMBER_COLORS[3] },
-  ];
-  const [me, shen, lin, su] = members;
+  const me = { id: 'me', name: '我', color: MEMBER_COLORS[0] };
+  const shen = { id: uid(), name: '沈书', color: MEMBER_COLORS[1] };
+  const lin = { id: uid(), name: '林晚', color: MEMBER_COLORS[2] };
+  const su = { id: uid(), name: '苏砚', color: MEMBER_COLORS[3] };
+  const gu = { id: uid(), name: '顾远', color: MEMBER_COLORS[4] };
+  const team1 = { id: uid(), name: '同行小队', members: [me, shen, lin, su] };
+  const team2 = { id: uid(), name: '读书会', members: [{ ...me }, gu] };
   const now = Date.now();
+  const T = (o) => ({ id: uid(), done: false, delayed: false, remind: false, createdAt: now - 86400e3, ...o });
   const tasks = [
-    { id: uid(), title: '晨间整理 · 列出今天最重要的三件事', date: t, time: '08:30', tag: 'life',  assignee: me.id,   done: true,  delayed: false, createdAt: now - 86400e3, doneAt: now - 3600e3 * 5 },
-    { id: uid(), title: '完成字灵 App 视觉走查',             date: t, time: '10:00', tag: 'work',  assignee: me.id,   done: true,  delayed: false, createdAt: now - 86400e3, doneAt: now - 3600e3 * 2 },
-    { id: uid(), title: '和团队对一版日程模块交互稿',         date: t, time: '15:00', tag: 'work',  assignee: shen.id, done: false, delayed: false, createdAt: now - 86400e3 },
-    { id: uid(), title: '读《设计中的设计》两章',             date: t, time: '21:00', tag: 'study', assignee: me.id,   done: false, delayed: false, createdAt: now - 86400e3 },
-    { id: uid(), title: '整理上周的会议纪要',                 date: t, time: '',      tag: 'work',  assignee: lin.id,  done: false, delayed: true,  createdAt: now - 2 * 86400e3 },
-    { id: uid(), title: '准备周五的项目演示',                 date: tm, time: '14:00', tag: 'work', assignee: su.id,   done: false, delayed: false, createdAt: now - 86400e3 },
-    { id: uid(), title: '给字灵新增三个形态彩蛋',             date: t3, time: '',      tag: 'work', assignee: me.id,   done: false, delayed: false, createdAt: now - 86400e3 },
+    T({ title: '晨间整理 · 列出今天最重要的三件事', date: t, time: '08:30', tag: 'life',  teamId: team1.id, assignee: 'me', done: true, doneAt: now - 3600e3 * 5 }),
+    T({ title: '完成字灵 App 视觉走查',             date: t, time: '10:00', tag: 'work',  teamId: team1.id, assignee: 'me', done: true, doneAt: now - 3600e3 * 2 }),
+    T({ title: '和团队对一版日程模块交互稿',         date: t, time: '15:00', tag: 'work',  teamId: team1.id, assignee: shen.id }),
+    T({ title: '读《设计中的设计》两章',             date: t, time: '21:00', tag: 'study', teamId: team2.id, assignee: 'me' }),
+    T({ title: '整理上周的会议纪要',                 date: t, time: '',      tag: 'work',  teamId: team1.id, assignee: lin.id, delayed: true, createdAt: now - 2 * 86400e3 }),
+    T({ title: '准备周五的项目演示',                 date: tm, time: '14:00', tag: 'work', teamId: team1.id, assignee: su.id }),
+    T({ title: '给字灵新增三个形态彩蛋',             date: t3, time: '',      tag: 'work', teamId: team1.id, assignee: 'me' }),
   ];
   return {
+    v: 2,
     profile: { name: '行者', motto: '把日子过成诗' },
-    settings: { theme: 'auto', uiStyle: null },   // uiStyle: null=首次进入待选 | 'ink' 水墨 | 'modern' 现代
-    teamName: '同行小队',
-    members,
+    settings: { theme: 'auto', uiStyle: null, remindSound: true },
+    teams: [team1, team2],
+    currentTeamId: team1.id,
     tasks,
     feed: [
-      { id: uid(), ts: now - 3600e3 * 2, who: me.name, text: '完成了「完成字灵 App 视觉走查」' },
-      { id: uid(), ts: now - 3600e3 * 7, who: shen.name, text: '加入了团队' },
+      { id: uid(), ts: now - 3600e3 * 2, who: '我', text: '完成了「完成字灵 App 视觉走查」', teamId: team1.id },
+      { id: uid(), ts: now - 3600e3 * 7, who: shen.name, text: '加入了团队', teamId: team1.id },
+      { id: uid(), ts: now - 3600e3 * 9, who: gu.name, text: '加入了团队', teamId: team2.id },
     ],
     seededAt: now,
   };
+}
+
+/** v1（单团队）→ v2（多团队 + 提醒字段）。 */
+function migrate(s) {
+  if (s.v >= 2) return s;
+  const team = {
+    id: uid(),
+    name: s.teamName || '同行小队',
+    members: (s.members && s.members.length ? s.members : [{ id: 'me', name: '我', color: MEMBER_COLORS[0] }]),
+  };
+  s.teams = [team];
+  s.currentTeamId = team.id;
+  (s.tasks || []).forEach((t) => { t.teamId = team.id; if (t.remind == null) t.remind = false; });
+  (s.feed || []).forEach((f) => { f.teamId = team.id; });
+  if (s.settings && s.settings.remindSound == null) s.settings.remindSound = true;
+  delete s.teamName; delete s.members;
+  s.v = 2;
+  return s;
 }
 
 let state = null;
@@ -63,9 +85,11 @@ export function load() {
   if (state) return state;
   try {
     const raw = localStorage.getItem(KEY);
-    state = raw ? JSON.parse(raw) : seed();
+    state = raw ? migrate(JSON.parse(raw)) : seed();
   } catch { state = seed(); }
-  if (!('uiStyle' in state.settings)) state.settings.uiStyle = null;   // 旧数据迁移
+  if (!('uiStyle' in state.settings)) state.settings.uiStyle = null;
+  if (!state.teams || !state.teams.length) { const fresh = seed(); state.teams = fresh.teams; state.currentTeamId = fresh.currentTeamId; }
+  if (!state.teams.find((t) => t.id === state.currentTeamId)) state.currentTeamId = state.teams[0].id;
   save();
   return state;
 }
@@ -78,12 +102,80 @@ function save() {
 export const onChange = (fn) => { listeners.add(fn); };
 export const get = () => state || load();
 
-/* ── 任务 ───────────────────────────────────────────────── */
-export function addTask({ title, date, time = '', tag = 'work', assignee = 'me' }) {
-  const t = { id: uid(), title: title.trim(), date, time, tag, assignee, done: false, delayed: false, createdAt: Date.now() };
-  state.tasks.unshift(t);
-  logFeed(assignee, `创建了「${t.title}」`);
+/** 任务操作的同步钩子（api.js 注册；本地模式为空操作）。 */
+let syncFn = null;
+export const setSync = (fn) => { syncFn = fn; };
+const emit = (op, t) => { try { syncFn && syncFn(op, t); } catch { /* 同步失败不打断 UI */ } };
+
+/* ── 团队 ───────────────────────────────────────────────── */
+export const teams = () => get().teams;
+export const currentTeam = () => get().teams.find((t) => t.id === get().currentTeamId) || get().teams[0];
+export function setCurrentTeam(id) {
+  if (get().teams.find((t) => t.id === id)) { state.currentTeamId = id; save(); }
+}
+export function addTeam(name) {
+  const team = {
+    id: uid(), name: (name || '新团队').trim().slice(0, 12),
+    members: [{ id: 'me', name: get().profile.name.slice(0, 2) || '我', color: MEMBER_COLORS[0] }],
+  };
+  state.teams.push(team);
+  state.currentTeamId = team.id;
+  state.feed.unshift({ id: uid(), ts: Date.now(), who: '我', text: `创建了团队「${team.name}」`, teamId: team.id });
   save();
+  return team;
+}
+export function renameTeam(id, name) {
+  const t = state.teams.find((x) => x.id === id);
+  if (t) { t.name = name.trim().slice(0, 12) || t.name; save(); }
+}
+export function removeTeam(id) {
+  if (state.teams.length <= 1) return false;   // 至少保留一个团队
+  state.teams = state.teams.filter((t) => t.id !== id);
+  state.tasks = state.tasks.filter((t) => t.teamId !== id);
+  state.feed = state.feed.filter((f) => f.teamId !== id);
+  if (state.currentTeamId === id) state.currentTeamId = state.teams[0].id;
+  save();
+  return true;
+}
+
+export function addMember(name, teamId = get().currentTeamId) {
+  const team = state.teams.find((t) => t.id === teamId);
+  if (!team) return;
+  const m = { id: uid(), name: name.trim().slice(0, 6), color: MEMBER_COLORS[team.members.length % MEMBER_COLORS.length] };
+  team.members.push(m);
+  state.feed.unshift({ id: uid(), ts: Date.now(), who: m.name, text: '加入了团队', teamId });
+  save();
+  return m;
+}
+export function removeMember(id, teamId = get().currentTeamId) {
+  if (id === 'me') return;
+  const team = state.teams.find((t) => t.id === teamId);
+  if (!team) return;
+  team.members = team.members.filter((m) => m.id !== id);
+  state.tasks.forEach((t) => { if (t.teamId === teamId && t.assignee === id) t.assignee = 'me'; });
+  save();
+}
+
+/** 找成员：先在指定/当前团队找，再全局找（任务行展示用）。 */
+export function memberOf(id, teamId) {
+  const team = teamId && get().teams.find((t) => t.id === teamId);
+  const inTeam = team && team.members.find((m) => m.id === id);
+  if (inTeam) return inTeam;
+  for (const t of get().teams) { const m = t.members.find((x) => x.id === id); if (m) return m; }
+  return { id: 'me', name: '我', color: MEMBER_COLORS[0] };
+}
+export const teamOf = (task) => get().teams.find((t) => t.id === task.teamId);
+
+/* ── 任务 ───────────────────────────────────────────────── */
+export function addTask({ title, date, time = '', tag = 'work', assignee = 'me', teamId = get().currentTeamId, remind = false }) {
+  const t = {
+    id: uid(), title: title.trim(), date, time, tag, assignee, teamId,
+    remind: remind && !!time, done: false, delayed: false, createdAt: Date.now(),
+  };
+  state.tasks.unshift(t);
+  logFeed(t, `创建了「${t.title}」`);
+  save();
+  emit('create', t);
   return t;
 }
 
@@ -91,7 +183,10 @@ export function updateTask(id, patch) {
   const t = state.tasks.find((x) => x.id === id);
   if (!t) return;
   Object.assign(t, patch);
+  if (!t.time) t.remind = false;
+  if (patch.date || patch.time) { delete t.remindedAt; delete t.snoozeUntil; }   // 改期 → 重新武装提醒
   save();
+  emit('update', t);
   return t;
 }
 
@@ -100,8 +195,9 @@ export function toggleDone(id) {
   if (!t) return;
   t.done = !t.done;
   t.doneAt = t.done ? Date.now() : undefined;
-  if (t.done) { t.delayed = false; logFeed(t.assignee, `完成了「${t.title}」`); }
+  if (t.done) { t.delayed = false; logFeed(t, `完成了「${t.title}」`); }
   save();
+  emit(t.done ? 'done' : 'undone', t);
   return t;
 }
 
@@ -109,7 +205,7 @@ export function toggleDelayed(id) {
   const t = state.tasks.find((x) => x.id === id);
   if (!t) return;
   t.delayed = !t.delayed;
-  if (t.delayed) { t.done = false; logFeed(t.assignee, `搁置了「${t.title}」`); }
+  if (t.delayed) { t.done = false; logFeed(t, `搁置了「${t.title}」`); }
   save();
   return t;
 }
@@ -121,19 +217,23 @@ export function moveToTomorrow(id) {
   d.setDate(d.getDate() + 1);
   t.date = todayStr(d);
   t.delayed = false;
-  logFeed(t.assignee, `把「${t.title}」顺延了一天`);
+  delete t.remindedAt; delete t.snoozeUntil;
+  logFeed(t, `把「${t.title}」顺延了一天`);
   save();
+  emit('update', t);
   return t;
 }
 
 export function removeTask(id) {
+  const t = state.tasks.find((x) => x.id === id);
   state.tasks = state.tasks.filter((x) => x.id !== id);
   save();
+  if (t) emit('delete', t);
 }
 
 export const tasksOn = (date) => get().tasks.filter((t) => t.date === date);
 
-/** 今日视图 = 当天任务 + 之前没做完的（自动视为"拖延"，不让旧账消失） */
+/** 今日视图（跨团队的"我的一天"）= 当天任务 + 之前没做完的（自动视为"拖延"）。 */
 export function todayView() {
   const t = todayStr();
   const list = get().tasks.filter((x) => x.date === t || (!x.done && x.date < t));
@@ -155,40 +255,50 @@ export function zilingPayload() {
   };
 }
 
-/* ── 团队 ───────────────────────────────────────────────── */
-export function addMember(name) {
-  const m = { id: uid(), name: name.trim().slice(0, 6), color: MEMBER_COLORS[state.members.length % MEMBER_COLORS.length] };
-  state.members.push(m);
-  state.feed.unshift({ id: uid(), ts: Date.now(), who: m.name, text: '加入了团队' });
+/* ── 提醒 ───────────────────────────────────────────────── */
+export function setRemind(id, on) {
+  const t = state.tasks.find((x) => x.id === id);
+  if (!t) return;
+  t.remind = on && !!t.time;
+  delete t.remindedAt; delete t.snoozeUntil;
   save();
-  return m;
+  return t;
+}
+/** 该响的提醒：今天、有时间、开了提醒、没完成、时间到了、还没响过（或贪睡到点）。 */
+export function dueReminders(now = Date.now()) {
+  const t = todayStr();
+  const hhmm = new Date(now).toTimeString().slice(0, 5);
+  return get().tasks.filter((x) =>
+    x.remind && !x.done && x.date === t && x.time && !x.remindedAt
+    && (x.snoozeUntil ? now >= x.snoozeUntil : x.time <= hhmm));
+}
+export function markReminded(id) {
+  const t = state.tasks.find((x) => x.id === id);
+  if (t) { t.remindedAt = Date.now(); delete t.snoozeUntil; save(); }
+}
+export function snoozeReminder(id, mins = 10) {
+  const t = state.tasks.find((x) => x.id === id);
+  if (t) { t.snoozeUntil = Date.now() + mins * 60e3; delete t.remindedAt; save(); }
 }
 
-export function removeMember(id) {
-  if (id === 'me') return;
-  state.members = state.members.filter((m) => m.id !== id);
-  state.tasks.forEach((t) => { if (t.assignee === id) t.assignee = 'me'; });
-  save();
+/* ── 动态 / 统计 ────────────────────────────────────────── */
+function logFeed(task, text) {
+  const who = memberOf(task.assignee, task.teamId)?.name || '我';
+  state.feed.unshift({ id: uid(), ts: Date.now(), who, text, teamId: task.teamId });
+  state.feed = state.feed.slice(0, 80);
 }
 
-export function setTeamName(name) { state.teamName = name.trim() || state.teamName; save(); }
-export const memberOf = (id) => get().members.find((m) => m.id === id) || get().members[0];
-
-function logFeed(assigneeId, text) {
-  const who = memberOf(assigneeId)?.name || '我';
-  state.feed.unshift({ id: uid(), ts: Date.now(), who, text });
-  state.feed = state.feed.slice(0, 40);
-}
-
-/** 本周每位成员的完成率（团队页统计条） */
-export function weekStats() {
+/** 本周当前团队每位成员的完成率。 */
+export function weekStats(teamId = get().currentTeamId) {
+  const team = state.teams.find((t) => t.id === teamId);
+  if (!team) return [];
   const now = new Date();
   const day = (now.getDay() + 6) % 7;            // 周一为一周之始
   const mon = new Date(now); mon.setDate(now.getDate() - day);
   const start = todayStr(mon);
   const end = todayStr(new Date(mon.getTime() + 6 * 86400e3));
-  return get().members.map((m) => {
-    const mine = get().tasks.filter((t) => t.assignee === m.id && t.date >= start && t.date <= end);
+  return team.members.map((m) => {
+    const mine = get().tasks.filter((t) => t.teamId === teamId && t.assignee === m.id && t.date >= start && t.date <= end);
     return { member: m, total: mine.length, done: mine.filter((t) => t.done).length };
   });
 }
@@ -197,6 +307,7 @@ export function weekStats() {
 export function setProfile(patch) { Object.assign(state.profile, patch); save(); }
 export function setTheme(theme) { state.settings.theme = theme; save(); }
 export function setUIStyle(style) { state.settings.uiStyle = style; save(); }
+export function setRemindSound(on) { state.settings.remindSound = !!on; save(); }
 
 export function totalStats() {
   const ts = get().tasks;
@@ -207,6 +318,18 @@ export function totalStats() {
 
 export function exportJSON() { return JSON.stringify(state, null, 2); }
 export function resetAll(withSeed = true) {
-  state = withSeed ? seed() : { ...seed(), tasks: [], feed: [], members: [{ id: 'me', name: '我', color: MEMBER_COLORS[0] }] };
+  if (withSeed) { state = seed(); }
+  else {
+    const s = seed();
+    const team = { id: s.teams[0].id, name: '我的团队', members: [{ id: 'me', name: '我', color: MEMBER_COLORS[0] }] };
+    state = { ...s, tasks: [], feed: [], teams: [team], currentTeamId: team.id };
+  }
+  save();
+}
+
+/** 登录后从后端拉到的数据整体替换（api.js 用）。 */
+export function replaceData({ teams: ts, tasks, currentTeamId }) {
+  if (ts && ts.length) { state.teams = ts; state.currentTeamId = currentTeamId || ts[0].id; }
+  if (tasks) state.tasks = tasks;
   save();
 }
