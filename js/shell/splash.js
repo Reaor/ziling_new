@@ -48,14 +48,32 @@ export function playSplash({ onDone }) {
   }
   wrap.addEventListener('pointerdown', end);
 
-  /* ════════════ 现代风：极简线与字标 ════════════ */
+  /** 品牌 logo（双山形眉眼 + 圆环），以 120 单位坐标系绘制。 */
+  function drawLogo(x, y, size, alpha) {
+    const u = size / 120;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = COL.seal;
+    ctx.lineWidth = 11 * u;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.translate(x - 60 * u, y - 60 * u);
+    ctx.beginPath(); ctx.moveTo(20 * u, 57 * u); ctx.lineTo(37 * u, 31 * u); ctx.lineTo(54 * u, 57 * u); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(66 * u, 57 * u); ctx.lineTo(83 * u, 31 * u); ctx.lineTo(100 * u, 57 * u); ctx.stroke();
+    ctx.beginPath(); ctx.arc(60 * u, 80 * u, 14 * u, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ════════════ 现代风：logo + 极简线与字标 ════════════ */
   if (modern) {
-    const T_END = reduced ? 0.4 : 2.1;
+    const T_END = reduced ? 0.4 : 2.2;
     const cx = W / 2, cy = H * 0.46;
     const frame = (now) => {
       if (t0 === null) t0 = now;
       const t = reduced ? T_END : (now - t0) / 1000;
       ctx.clearRect(0, 0, W, H);
+      // 0) 品牌 logo 浮起
+      const k0 = Math.min(1, t / 0.5);
+      drawLogo(cx, cy - 64 + (1 - easeOut(k0)) * 10, 88, easeOut(k0));
       // 1) 细线自中心向两侧展开
       const k1 = Math.min(1, t / 0.55);
       const lineW = 132 * easeOut(k1);

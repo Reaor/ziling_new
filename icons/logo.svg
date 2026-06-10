@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <!-- zicodo / 字灵 品牌 logo：双山形眉眼 + 圆环（青瓷 #87C8B4） -->
+  <g fill="none" stroke="#87C8B4" stroke-width="11" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 57 L37 31 L54 57"/>
+    <path d="M66 57 L83 31 L100 57"/>
+    <circle cx="60" cy="80" r="14"/>
+  </g>
+</svg>
