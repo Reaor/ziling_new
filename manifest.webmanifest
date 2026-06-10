@@ -1,7 +1,7 @@
 {
-  "name": "字灵日程",
-  "short_name": "字灵",
-  "description": "有一只汉字精灵陪伴的日程管理（zicodo）",
+  "name": "zicodo",
+  "short_name": "zicodo",
+  "description": "有一只汉字精灵「字灵」陪伴的日程管理",
   "lang": "zh-CN",
   "start_url": ".",
   "scope": ".",

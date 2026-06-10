@@ -30,7 +30,7 @@ function fire(task) {
   try { navigator.vibrate && navigator.vibrate([180, 90, 180]); } catch { /* */ }
   if (document.hidden && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
     try {
-      const n = new Notification('字灵日程 · 到点了', { body: `${task.time}  ${task.title}`, tag: `zl-${task.id}` });
+      const n = new Notification('zicodo · 到点了', { body: `${task.time}  ${task.title}`, tag: `zl-${task.id}` });
       n.onclick = () => { window.focus(); n.close(); };
     } catch { /* 部分 WebView 无 Notification 构造器 */ }
   }

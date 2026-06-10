@@ -694,3 +694,70 @@ html:not([data-ui="modern"]) .empty { letter-spacing: .12em; padding: 40px 0 30p
 /* 团队切换条：与成员条同件不同味——略小、贴顶 */
 .team-strip { padding-bottom: 2px; margin-bottom: 6px; }
 .team-strip .big-avatar { width: 44px; height: 44px; border-radius: 13px; font-size: 20px; }
+
+/* ════════════════════════════════════════════════════════════════════
+   第二轮特化：水墨 → 酷/有趣/未来感；现代 → 更好用
+   ════════════════════════════════════════════════════════════════════ */
+
+/* —— logo 作为界面图标（中央 tab、字灵寄语头像） —— */
+.tab-seal svg { width: 27px; height: 27px; display: block; }
+.seal-avatar svg { width: 26px; height: 26px; display: block; }
+
+/* —— 水墨 · 电路纹装饰线（呼应字灵的电路血统；虚线缓慢流动 = 未来感） —— */
+html:not([data-ui="modern"]) .circuit-line { display: block; margin: 9px 0 0 2px; color: var(--seal); }
+[data-ui="modern"] .circuit-line { display: none; }
+.circuit-line .cl-path { stroke-dasharray: 6 7; animation: clflow 2.8s linear infinite; }
+@keyframes clflow { to { stroke-dashoffset: -26; } }
+
+/* —— 水墨 · 青瓷辉光（进度环 / 中央灵钮 / 落笔钮，深色夜墨下尤其出彩） —— */
+html:not([data-ui="modern"]) .ring-fg {
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--seal) 55%, transparent));
+}
+html:not([data-ui="modern"]) .tab-center.active .tab-seal {
+  animation: sealPulse 2.6s ease-in-out infinite;
+}
+@keyframes sealPulse {
+  0%, 100% { box-shadow: 0 8px 20px -2px color-mix(in srgb, var(--seal) 70%, transparent), 0 0 0 0 color-mix(in srgb, var(--seal) 35%, transparent); }
+  50%      { box-shadow: 0 8px 20px -2px color-mix(in srgb, var(--seal) 70%, transparent), 0 0 0 9px color-mix(in srgb, var(--seal) 0%, transparent); }
+}
+html:not([data-ui="modern"]) .fab { animation: fabBreath 3.2s ease-in-out infinite; }
+@keyframes fabBreath {
+  0%, 100% { box-shadow: 0 4px 10px rgba(0,0,0,.16), 0 0 14px -2px color-mix(in srgb, var(--seal) 40%, transparent); }
+  50%      { box-shadow: 0 4px 10px rgba(0,0,0,.16), 0 0 26px 0   color-mix(in srgb, var(--seal) 62%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .circuit-line .cl-path, html:not([data-ui="modern"]) .tab-center.active .tab-seal,
+  html:not([data-ui="modern"]) .fab { animation: none; }
+}
+
+/* —— 现代 · 快速添加栏（回车即记，办公最短路径） —— */
+.quick-add {
+  display: flex; gap: 8px; margin-bottom: 14px;
+}
+.quick-add input {
+  flex: 1; min-width: 0; border: 1px solid var(--hairline); background: var(--paper-2);
+  color: var(--ink); border-radius: 12px; padding: 12px 14px; font-size: 14.5px;
+  font-family: inherit; outline: none; box-shadow: var(--shadow-card);
+}
+.quick-add input:focus { border-color: var(--seal); }
+.quick-add button {
+  flex: none; width: 46px; border: none; border-radius: 12px; cursor: pointer;
+  background: var(--seal); color: var(--on-accent); font-size: 20px; line-height: 1;
+  box-shadow: var(--shadow-card);
+}
+.quick-add button:active { transform: scale(.94); }
+
+/* —— 现代 · 分组标题吸顶（长列表滚动时始终知道自己在哪一段） —— */
+[data-ui="modern"] .group-label {
+  position: sticky; top: -1px; z-index: 5;
+  background: linear-gradient(var(--paper) 78%, transparent);
+  padding: 6px 0 8px; margin-top: 12px;
+}
+
+/* —— 日历 · 分组行上的"＋ 这天新建" —— */
+.gl-add {
+  border: 1px solid var(--hairline); background: var(--paper-2); color: var(--seal-deep);
+  width: 26px; height: 26px; border-radius: 9px; cursor: pointer; font-size: 15px;
+  line-height: 1; padding: 0; flex: none;
+}
+.gl-add:active { transform: scale(.92); }

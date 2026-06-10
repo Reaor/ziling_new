@@ -1,7 +1,7 @@
-/* 字灵日程 Service Worker：壳缓存（添加到主屏幕/弱网可用）。
+/* zicodo Service Worker：壳缓存（添加到主屏幕/弱网可用）。
  * 策略：导航请求 network-first（保证拿到新版本，离线回缓存）；静态资源 cache-first。
  * 发版时改 VERSION 即整体失效旧缓存。 */
-const VERSION = 'zl-v3';
+const VERSION = 'zl-v4';
 const CORE = [
   './', 'index.html', 'ziling.html', 'manifest.webmanifest',
   'css/shell.css', 'css/app.css',
@@ -9,7 +9,7 @@ const CORE = [
   'js/app.js', 'js/ai/bridge.js', 'js/ai/mock.js', 'js/ui/settings.js', 'js/game/wordmatch.js',
   'js/render/renderer.js', 'js/input/gestures.js',
   'js/core/grid.js', 'js/core/character.js', 'js/core/motion.js', 'js/core/shape.js',
-  'icons/icon-192.png', 'icons/icon-512.png',
+  'icons/icon-192.png', 'icons/icon-512.png', 'icons/logo.svg',
 ];
 
 self.addEventListener('install', (e) => {
