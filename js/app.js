@@ -882,7 +882,8 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     try {
       const q = new URLSearchParams(location.search).get('schedule');
-      if (q) window.setSchedule(q);
+      // 延后到模块执行完再注入：presentSchedule 引用的 intro 等声明在本函数调用点之后（TDZ）。
+      if (q) setTimeout(() => window.setSchedule(q), 0);
     } catch { /* ignore */ }
     if (window.ZILING_CONFIG && window.ZILING_CONFIG.schedule) window.setSchedule(window.ZILING_CONFIG.schedule);
   }
