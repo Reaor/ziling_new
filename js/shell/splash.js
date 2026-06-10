@@ -84,9 +84,9 @@ export function playSplash({ onDone }) {
       ctx.save();
       ctx.globalAlpha = easeOut(k2);
       ctx.fillStyle = COL.ink;
-      ctx.font = `650 30px ${getComputedStyle(document.body).fontFamily}`;
+      ctx.font = `700 34px ${getComputedStyle(document.body).fontFamily}`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-      ctx.fillText('字灵日程', cx, cy + 8 - (1 - easeOut(k2)) * 14);
+      ctx.fillText('zicodo', cx, cy + 8 - (1 - easeOut(k2)) * 14);
       ctx.restore();
       // 3) 强调色圆点沿线滑入定位 + 小字
       const k3 = Math.min(1, Math.max(0, (t - 0.7) / 0.5));
@@ -241,7 +241,13 @@ export function playSplash({ onDone }) {
       ctx.fillStyle = COL.ink3;
       ctx.font = `12.5px ${getComputedStyle(document.body).fontFamily}`;
       ctx.textAlign = 'center';
-      ctx.fillText('一 笔 一 画 ， 把 日 子 过 成 诗', cx, cy + wordSize * 1.85 + (1 - easeOut(k)) * 8);
+      const subY = cy + wordSize * 1.85 + (1 - easeOut(k)) * 8;
+      ctx.font = `600 15px ${getComputedStyle(document.body).fontFamily}`;
+      ctx.fillStyle = COL.ink2;
+      ctx.fillText('z i c o d o', cx, subY - 24);
+      ctx.font = `12.5px ${getComputedStyle(document.body).fontFamily}`;
+      ctx.fillStyle = COL.ink3;
+      ctx.fillText('一 笔 一 画 ， 把 日 子 过 成 诗', cx, subY);
       ctx.restore();
     }
 

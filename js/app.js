@@ -1766,97 +1766,140 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ── Render loop ───────────────────────────────────────────
-  // ── 开屏动画（电路线如颜料注入 → 染出品牌 logo 脸（山形眉眼+圆环）→ 右眼 wink → 高级淡出 → 呈现日程）──
-  // 思路：许多细线从画面外沿电路风折线汇向中心脸部轮廓，像"注入颜料"一样逐步把 logo 染显出来；
-  // 注入完成线即隐去，脸短暂保持并 wink，随后整体高级淡出。颜色用品牌青瓷 INTRO_ACCENT。
-  const intro = { active: true, t: 0, lines: null, done: false };
-  // 阶段：注入(线流入+脸渐染) → 保持/wink → 淡出。
-  const INTRO_INJECT_MS = 1700, INTRO_HOLD_MS = 1300, INTRO_FADE_MS = 700;
-  const INTRO_TOTAL = INTRO_INJECT_MS + INTRO_HOLD_MS + INTRO_FADE_MS;
-  const INTRO_ACCENT = '#87C8B4';   // 品牌主色 · 青瓷（logo 用色；深浅主题都耐看）
-  // 品牌 logo 的笔画（相对中心、单位尺度 S）：左右两道山形眉眼 + 下方圆环。粗线、圆头。
-  // wink：右眼塌成一座平缓的小山（峰更低、更扁），与 logo 眨眼稿一致。
-  function faceStrokes(cx, cy, S, winking) {
-    const eyeGap = S * 0.92, eyeY = cy - S * 0.22, eyeW = S * 0.46;
-    const hat = (ex) => [[ex - eyeW / 2, eyeY + eyeW * 0.5], [ex, eyeY - eyeW * 0.45], [ex + eyeW / 2, eyeY + eyeW * 0.5]];
-    const strokes = [hat(cx - eyeGap / 2)];
-    if (winking) strokes.push([[cx + eyeGap / 2 - eyeW / 2, eyeY + eyeW * 0.5], [cx + eyeGap / 2, eyeY + eyeW * 0.08], [cx + eyeGap / 2 + eyeW / 2, eyeY + eyeW * 0.5]]);
-    else strokes.push(hat(cx + eyeGap / 2));
-    // 圆环：闭合多边形点列（从顶部起整圈），染色时像一笔环着画圆。
-    const ring = [], R = S * 0.24, ringY = cy + S * 0.34, N = 28;
-    for (let i = 0; i <= N; i++) {
-      const a = -Math.PI / 2 + (i / N) * Math.PI * 2;
-      ring.push([cx + Math.cos(a) * R, ringY + Math.sin(a) * R]);
-    }
-    strokes.push(ring);
-    return strokes;
-  }
-  function buildIntroLines(W, H, cx, cy) {
-    const n = 30, arr = [];
-    for (let i = 0; i < n; i++) {
-      const edge = i % 4, t = (i * 9301 % 1000) / 1000;
-      let sx, sy;
-      if (edge === 0) { sx = -20; sy = H * t; }
-      else if (edge === 1) { sx = W + 20; sy = H * t; }
-      else if (edge === 2) { sx = W * t; sy = -20; }
-      else { sx = W * t; sy = H + 20; }
-      // 终点散布在脸部区域（让线像注入脸部），折线直角走线（电路风）。
-      const ex = cx + (t - 0.5) * Math.min(W, H) * 0.34;
-      const ey = cy + (((i * 7) % 11) / 11 - 0.5) * Math.min(W, H) * 0.34;
-      const midX = (i % 2) ? ex : sx, midY = (i % 2) ? sy : ey;
-      arr.push({ sx, sy, midX, midY, ex, ey, delay: t * 0.45 });
-    }
-    return arr;
-  }
-  function drawIntro(dtMs, now) {
+  // ── 开屏动画「青瓷墨滴成灵」（替换旧·电路注入版）──────────────────────────
+  // 叙事：一滴青瓷墨从天而落 → 落点涟漪 → 墨滴沿圆周滑行画出圆环 → 两道笔锋
+  // 向上挑出山形眉眼（即品牌 logo）→ 眨眼两次（右眼塌成平缓小山，平滑形变）→
+  // 圆环轻呼吸 → 整体上浮淡出，里字接管。点一下随时跳过。
+  const intro = { active: true, t: 0, done: false };
+  const INTRO_TOTAL = 3200;
+  const INTRO_ACCENT = '#87C8B4';   // 品牌主色 · 青瓷
+  const easeOutI = (x) => 1 - Math.pow(1 - x, 3);
+  const easeInI = (x) => x * x * x;
+  const clamp01 = (x) => Math.max(0, Math.min(1, x));
+
+  function drawIntro(dtMs) {
     intro.t += dtMs;
+    const t = intro.t;
     const ctx = renderer.getContext();
     const W = renderer.cssWidth, H = renderer.cssHeight, cx = W / 2, cy = H / 2;
     const S = Math.min(W, H) * 0.20;
-    if (!intro.lines) intro.lines = buildIntroLines(W, H, cx, cy);
+    const LW = Math.max(3, S * 0.11);
+    // 几何（与 logo 稿一致）：双山眉眼 + 下方圆环
+    const eyeGap = S * 0.92, eyeY = cy - S * 0.22, eyeW = S * 0.46;
+    const R = S * 0.24, ringY = cy + S * 0.34;
+    const topX = cx, topY = ringY - R;          // 圆环顶点 = 墨滴落点
+
+    // 时间轴（ms）
+    const T_DROP = 550;                          // 落滴
+    const T_RING0 = 550, T_RING1 = 1250;         // 画环（墨滴沿圆周滑行）
+    const T_EYE0 = 850, T_EYE1 = 1500;           // 挑眉眼（两笔先后）
+    const T_FADE0 = 2600;                        // 上浮淡出
+
+    // 整体淡出/上浮（最后一段）
+    const fadeP = clamp01((t - T_FADE0) / (INTRO_TOTAL - T_FADE0));
+    const gAlpha = 1 - easeInI(fadeP);
+    const gRise = -12 * easeOutI(fadeP);
+    const gScale = 1 - 0.06 * easeOutI(fadeP);
+
     ctx.save();
+    ctx.translate(cx, cy + gRise);
+    ctx.scale(gScale, gScale);
+    ctx.translate(-cx, -cy);
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.strokeStyle = INTRO_ACCENT; ctx.fillStyle = INTRO_ACCENT;
 
-    const inject = Math.min(1, intro.t / INTRO_INJECT_MS);                 // 0→1 注入进度
-    const fade = intro.t > INTRO_TOTAL - INTRO_FADE_MS
-      ? Math.max(0, (INTRO_TOTAL - intro.t) / INTRO_FADE_MS) : 1;          // 末尾整体淡出
-    const winking = intro.t > INTRO_INJECT_MS + 350 && intro.t < INTRO_INJECT_MS + 950;
+    // 1) 落滴：从画面顶部坠向圆环顶点，下落微拉伸、落地一瞬压扁。
+    const dropP = clamp01(t / T_DROP);
+    if (dropP < 1) {
+      const e = easeInI(dropP);                  // 重力感：加速下落
+      const y = -S * 0.4 + (topY + S * 0.4) * e;
+      const stretch = 1 + 0.5 * Math.min(1, Math.abs(1 - dropP) * 1.2) * dropP; // 越快越长
+      ctx.save();
+      ctx.globalAlpha = gAlpha * (0.35 + 0.65 * dropP);
+      ctx.translate(topX, y);
+      ctx.scale(1 / Math.sqrt(stretch), stretch);
+      ctx.beginPath(); ctx.arc(0, 0, S * 0.13, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
 
-    // 1) 注入线：注入阶段流入；越接近完成越淡（颜料注入完线就隐去）。线随 inject 收尾而消退。
-    const lineFade = Math.max(0, 1 - Math.max(0, (inject - 0.7) / 0.3));   // inject 70%→100% 淡出线
-    if (lineFade > 0.01) {
-      ctx.strokeStyle = INTRO_ACCENT; ctx.lineWidth = 1.4; ctx.globalAlpha = lineFade * fade * 0.9;
-      for (const ln of intro.lines) {
-        const p = Math.max(0, Math.min(1, (inject - ln.delay) / (1 - ln.delay + 1e-6)));
-        if (p <= 0) continue;
-        ctx.beginPath(); ctx.moveTo(ln.sx, ln.sy);
-        if (p < 0.5) { const q = p / 0.5; ctx.lineTo(ln.sx + (ln.midX - ln.sx) * q, ln.sy + (ln.midY - ln.sy) * q); }
-        else { ctx.lineTo(ln.midX, ln.midY); const q = (p - 0.5) / 0.5; ctx.lineTo(ln.midX + (ln.ex - ln.midX) * q, ln.midY + (ln.ey - ln.midY) * q); }
+    // 2) 落点涟漪：两圈先后扩散淡去（水面感）。
+    for (const [delay, dur] of [[T_DROP, 600], [T_DROP + 140, 700]]) {
+      const p = clamp01((t - delay) / dur);
+      if (p > 0 && p < 1) {
+        ctx.save();
+        ctx.globalAlpha = gAlpha * 0.5 * (1 - p);
+        ctx.lineWidth = LW * 0.35;
+        ctx.beginPath();
+        ctx.ellipse(topX, topY + S * 0.02, S * (0.1 + 0.85 * easeOutI(p)), S * (0.04 + 0.34 * easeOutI(p)), 0, 0, Math.PI * 2);
         ctx.stroke();
+        ctx.restore();
       }
     }
 
-    // 2) 脸：被"染出来"——笔画按 inject 进度从中心向两端逐段显现（dye），logo 风粗线圆头。
-    //    注入完成后保持 + wink；末尾随 fade 整体淡出。
-    const dye = easeIO(inject);
-    ctx.strokeStyle = INTRO_ACCENT; ctx.lineWidth = Math.max(3, S * 0.11); ctx.globalAlpha = fade;
-    for (const st of faceStrokes(cx, cy, S, winking)) {
-      // 沿折线按 dye 比例画出（从首端逐步染到尾端）。
-      const segs = st.length - 1, total = dye * segs;
-      ctx.beginPath(); ctx.moveTo(st[0][0], st[0][1]);
-      for (let s = 0; s < segs; s++) {
-        const f = Math.max(0, Math.min(1, total - s));
+    // 3) 画环：墨滴变成"笔"，沿圆周滑一圈把环画出来；收笔时环轻轻一弹。
+    const ringP = clamp01((t - T_RING0) / (T_RING1 - T_RING0));
+    if (ringP > 0) {
+      const sweep = easeOutI(ringP) * Math.PI * 2;
+      const pop = ringP >= 1 ? 1 + 0.05 * Math.sin(clamp01((t - T_RING1) / 220) * Math.PI) : 1;
+      // 呼吸（成形后）：圆环像在轻轻吐纳
+      const breathe = ringP >= 1 ? 1 + 0.02 * Math.sin((t - T_RING1) / 320) : 1;
+      ctx.save();
+      ctx.globalAlpha = gAlpha;
+      ctx.lineWidth = LW;
+      ctx.beginPath();
+      ctx.arc(topX, ringY, R * pop * breathe, -Math.PI / 2, -Math.PI / 2 + sweep);
+      ctx.stroke();
+      // 笔尖墨滴：跟在弧线前端，画完即收进线里
+      if (ringP < 1) {
+        const a = -Math.PI / 2 + sweep;
+        ctx.beginPath();
+        ctx.arc(topX + Math.cos(a) * R, ringY + Math.sin(a) * R, S * 0.12 * (1 - ringP * 0.55), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // 4) 挑眉眼：两笔先后从内端向外"挑"出山形（带一点点超挑回落的笔意）。
+    //    右眼支持眨眼形变：峰高在「山」与「平缓小山」之间平滑插值。
+    const blink = blinkAmt(t);   // 0=睁 1=塌
+    drawEye(cx - eyeGap / 2, 0, clamp01((t - T_EYE0) / (T_EYE1 - 220 - T_EYE0)));
+    drawEye(cx + eyeGap / 2, blink, clamp01((t - T_EYE0 - 220) / (T_EYE1 - T_EYE0 - 220)));
+
+    function drawEye(ex, b, p) {
+      if (p <= 0) return;
+      const e = easeOutI(p);
+      const over = 1 + 0.10 * Math.sin(Math.min(1, p * 1.15) * Math.PI);  // 笔锋超挑
+      const yEnd = eyeY + eyeW * 0.5;
+      const yPeakOpen = eyeY - eyeW * 0.45 * over;
+      const yPeak = yPeakOpen + (eyeY + eyeW * 0.08 - yPeakOpen) * b;     // 眨眼插值
+      const pts = [[ex - eyeW / 2, yEnd], [ex, yPeak], [ex + eyeW / 2, yEnd]];
+      const total = e * 2;
+      ctx.save();
+      ctx.globalAlpha = gAlpha;
+      ctx.lineWidth = LW;
+      ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let s = 0; s < 2; s++) {
+        const f = clamp01(total - s);
         if (f <= 0) break;
-        ctx.lineTo(st[s][0] + (st[s + 1][0] - st[s][0]) * f, st[s][1] + (st[s + 1][1] - st[s][1]) * f);
+        ctx.lineTo(pts[s][0] + (pts[s + 1][0] - pts[s][0]) * f, pts[s][1] + (pts[s + 1][1] - pts[s][1]) * f);
       }
       ctx.stroke();
+      ctx.restore();
     }
+
     ctx.restore();
 
     if (intro.t >= INTRO_TOTAL && !intro.done) {
       intro.done = true; intro.active = false;
       startAfterIntro();
     }
+  }
+  // 眨眼包络：两次（第一次从容、第二次俏皮地快），sin 半波进出都平滑。
+  function blinkAmt(t) {
+    for (const [a, b] of [[1650, 1980], [2200, 2420]]) {
+      if (t >= a && t <= b) return Math.sin(((t - a) / (b - a)) * Math.PI);
+    }
+    return 0;
   }
   function skipIntro() { if (intro.active) { intro.active = false; intro.done = true; startAfterIntro(); } }
   function startAfterIntro() {

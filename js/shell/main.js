@@ -163,8 +163,11 @@ function renderToday() {
     : `<header class="page-head">
         <div class="eyebrow">${weekText} · ${esc(store.get().profile.motto)}</div>
         <h1>${dateText}</h1>
-        <svg class="brush-line" width="150" height="10" viewBox="0 0 150 10" aria-hidden="true">
-          <path d="M2 6 C 40 2, 95 9, 148 4" stroke="currentColor" stroke-width="3" fill="none" stroke-linecap="round" opacity=".85"/>
+        <svg class="circuit-line" width="172" height="14" viewBox="0 0 172 14" aria-hidden="true">
+          <path class="cl-path" d="M2 11 H44 L56 3 H104 L116 11 H150" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="2" cy="11" r="2.6" fill="currentColor"/>
+          <circle cx="150" cy="11" r="2.6" fill="currentColor"/>
+          <circle cx="165" cy="11" r="2.1" fill="currentColor" opacity=".45"/>
         </svg>
         <span class="head-seal">${weekChar}</span>
       </header>`;
@@ -192,12 +195,20 @@ function renderToday() {
           <div class="detail">今日共 <b>${total}</b> 件事 · 已完成 <b>${v.done.length}</b> · 待办 <b>${v.doing.length}</b>${v.delayed.length ? ` · 搁置 <b>${v.delayed.length}</b>` : ''}</div>
         </div>
       </div>`;
+  // 现代版独有：快速添加栏（输入回车即记到今天——办公场景的最短路径）
+  const quickAddHtml = isModern()
+    ? `<div class="quick-add">
+        <input type="text" id="qa-input" maxlength="40" placeholder="快速添加：回车记到今天" enterkeyhint="done">
+        <button id="qa-btn" aria-label="添加">＋</button>
+      </div>`
+    : '';
   page.innerHTML = `
     ${headHtml}
     ${overviewHtml}
+    ${quickAddHtml}
 
     <div class="card ziling-note" id="go-ziling">
-      <span class="seal-avatar">灵</span>
+      <span class="seal-avatar"><svg viewBox="0 0 120 120" fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"><path d="M20 57 L37 31 L54 57"/><path d="M66 57 L83 31 L100 57"/><circle cx="60" cy="80" r="14"/></svg></span>
       <div class="note-body"><i>字灵寄语</i><p>${zilingQuote(v)}</p></div>
       <span class="go">›</span>
     </div>
@@ -209,7 +220,23 @@ function renderToday() {
   `;
   bindTaskRows(page);
   $('#go-ziling', page).addEventListener('click', () => go('ziling'));
+
+  // 快速添加：回车/点＋即建；store 变化会重绘本页，所以记一个"还要继续输入"的焦点标记
+  const qa = $('#qa-input', page);
+  if (qa) {
+    const submit = () => {
+      const title = qa.value.trim();
+      if (!title) return;
+      qaKeepFocus = true;
+      store.addTask({ title, date: store.todayStr() });
+      toast('已创建');
+    };
+    qa.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    $('#qa-btn', page).addEventListener('click', submit);
+    if (qaKeepFocus) { qaKeepFocus = false; qa.focus(); }
+  }
 }
+let qaKeepFocus = false;
 
 /* ════════════════════════════ 日历 ═══════════════════════════ */
 let calCursor = new Date();          // 当前查看的月份
@@ -261,7 +288,7 @@ function renderCalendar() {
         ${cells}
       </div>
     </div>
-    <div class="group-label">${selLabel}<span class="cnt">${selTasks.length} 件</span></div>
+    <div class="group-label">${selLabel}<span class="cnt">${selTasks.length} 件</span><button class="gl-add" id="cal-add" aria-label="在这天新建">＋</button></div>
     ${selTasks.length ? selTasks.map(taskRow).join('') : emptyBlock('白', T('这一天还是留白<br>点右下角为它写点什么', '这一天还没有安排<br>点右下角新建'))}
   `;
   page.querySelectorAll('[data-nav]').forEach((b) => b.addEventListener('click', () => {
@@ -274,6 +301,7 @@ function renderCalendar() {
     if (cd.getMonth() !== m) calCursor = cd;
     renderCalendar();
   }));
+  $('#cal-add', page).addEventListener('click', () => openTaskSheet());   // 默认日期=选中那天
   bindTaskRows(page);
 }
 
@@ -695,7 +723,7 @@ function renderMe() {
     </div>
 
     <div class="card cell-list">
-      <div class="cell" id="cell-about"><span class="c-icon">关</span><span class="c-label">关于字灵日程</span><span class="c-value">v1.0</span><span class="c-go">›</span></div>
+      <div class="cell" id="cell-about"><span class="c-icon">关</span><span class="c-label">关于 zicodo</span><span class="c-value">v1.0</span><span class="c-go">›</span></div>
     </div>
   `;
 
@@ -729,7 +757,7 @@ function renderMe() {
     const blob = new Blob([store.exportJSON()], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `字灵日程-${store.todayStr()}.json`;
+    a.download = `zicodo-${store.todayStr()}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
   });
@@ -738,7 +766,7 @@ function renderMe() {
   $('#cell-about', page).addEventListener('click', () => openSheet(`
     <h2 class="sheet-title">关于</h2>
     <p style="font-size:14px; line-height:1.9; color:var(--ink-2); margin:0 2px 18px;">
-      <b style="color:var(--ink)">字灵日程</b>是一个把日程管理与「汉字精灵」结合的小应用：
+      <b style="color:var(--ink)">zicodo</b> 是把日程管理与电子宠物「字灵」结合的应用：
       成百上千个汉字聚散成形，陪你看完今天的待办，给你鼓励与安慰。<br><br>
       · 数据只存在你的浏览器本地（localStorage）<br>
       · 中间的青瓷「灵」钮就是字灵的家：点它、拖它、双击它、和它说话<br>
@@ -757,7 +785,6 @@ function openAccountSheet() {
       <div class="cell-list" style="margin-bottom:14px;">
         <div class="cell"><span class="c-icon">名</span><span class="c-label">${esc(u.nickname || u.username)}</span><span class="c-value">@${esc(u.username || '')}</span></div>
         <div class="cell"><span class="c-icon">分</span><span class="c-label">总积分</span><span class="c-value">${u.totalPoints ?? 0}</span></div>
-        <div class="cell"><span class="c-icon">服</span><span class="c-label">服务器</span><span class="c-value" style="max-width:170px; overflow:hidden; text-overflow:ellipsis;">${esc(api.getBase())}</span></div>
       </div>
       <button class="btn btn-primary" id="a-sync" style="margin-bottom:8px;">立即同步任务</button>
       <button class="btn btn-danger-line" id="a-logout">退出登录</button>
@@ -867,7 +894,6 @@ function openNotifySheet() {
 const ZLS = {
   font: 'ziling.theme.font', color: 'ziling.theme.color', fx: 'ziling.theme.fx',
   scale: 'ziling.origin.scale', persona: 'ziling.persona', memory: 'ziling.memory',
-  key: 'ziling.deepseek.key',
 };
 const ZL_FONTS = [
   { label: '黑体', css: '"PingFang SC", "Microsoft YaHei", "Heiti SC", sans-serif' },
@@ -887,7 +913,6 @@ function openZilingSettingsSheet() {
     scale: parseFloat(lsGet(ZLS.scale, '1')) || 1,
     persona: lsGet(ZLS.persona),
     memory: lsGet(ZLS.memory) !== '0',
-    hasKey: !!lsGet(ZLS.key),
   };
   const sheet = openSheet(`
     <h2 class="sheet-title">字灵设置</h2>
@@ -912,12 +937,6 @@ function openZilingSettingsSheet() {
     <div class="field"><label>AI 记忆（带上下文对话）</label>
       <div class="inline-row"><div class="toggle ${cur.memory ? 'on' : ''}" id="z-memory"></div>
       <span class="hint-text grow">关闭后每句话都是新的开始</span></div></div>
-    <div class="field"><label>API Key（仅存本机，不上传）</label>
-      <div class="inline-row">
-        <input type="password" id="z-key" class="grow" placeholder="${cur.hasKey ? '已存（本机）' : 'DeepSeek key（可不填，用内置演示）'}" style="width:100%">
-        <button class="mini-btn" id="z-key-save">存</button>
-        <button class="mini-btn" id="z-key-clear">清</button>
-      </div></div>
     <p class="hint-text">字灵的底色与深浅跟随 App 的「外观」与「界面风格」；改动即时生效。</p>
     <button class="btn btn-ghost" id="z-done" style="margin-top:6px;">完成</button>
   `);
@@ -953,21 +972,6 @@ function openZilingSettingsSheet() {
     e.target.classList.toggle('on');
     lsSet(ZLS.memory, e.target.classList.contains('on') ? '1' : '0');
     apply();
-  });
-  $('#z-key-save', sheet).addEventListener('click', () => {
-    const v = $('#z-key', sheet).value.trim();
-    if (!v) { toast('先填入 key'); return; }
-    lsSet(ZLS.key, v);
-    $('#z-key', sheet).value = '';
-    $('#z-key', sheet).placeholder = '已存（本机）';
-    apply();
-    toast('已存到本机');
-  });
-  $('#z-key-clear', sheet).addEventListener('click', () => {
-    lsSet(ZLS.key, '');
-    $('#z-key', sheet).placeholder = 'DeepSeek key（可不填，用内置演示）';
-    apply();
-    toast('已清除');
   });
   $('#z-done', sheet).addEventListener('click', closeSheet);
 }
