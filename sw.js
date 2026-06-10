@@ -1,7 +1,7 @@
 /* zicodo Service Worker：壳缓存（添加到主屏幕/弱网可用）。
  * 策略：导航请求 network-first（保证拿到新版本，离线回缓存）；静态资源 cache-first。
  * 发版时改 VERSION 即整体失效旧缓存。 */
-const VERSION = 'zl-v4';
+const VERSION = 'zl-v5';
 const CORE = [
   './', 'index.html', 'ziling.html', 'manifest.webmanifest',
   'css/shell.css', 'css/app.css',

@@ -4,6 +4,19 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>字灵</title>
+  <script>
+    // 嵌入模式抗闪：在 CSS 首绘之前就把宿主 App 的调色板写入 --zl-bg/--zl-fg，
+    // 否则切到字灵页的第一两帧会先闪一下 app.css 的默认底色（深色系统下是旧版藏蓝）。
+    // 独立打开（无 pbg 参数）不生效，行为与原版一致。
+    (function () {
+      try {
+        var q = new URLSearchParams(location.search);
+        var bg = q.get('pbg'), fg = q.get('pfg');
+        if (bg) document.documentElement.style.setProperty('--zl-bg', '#' + bg);
+        if (fg) document.documentElement.style.setProperty('--zl-fg', '#' + fg);
+      } catch (e) { /* ignore */ }
+    })();
+  </script>
   <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
