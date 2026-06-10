@@ -103,6 +103,8 @@ body {
   font-family: var(--font-display); font-size: 56px; color: var(--ink-2);
   animation: breathe 2.2s ease-in-out infinite;
 }
+.zl-load-logo { width: 72px; height: 72px; animation: breathe 2.2s ease-in-out infinite; }
+.sheet-logo { display: block; width: 56px; height: 56px; margin: 2px auto 10px; }
 @keyframes breathe { 0%,100% { opacity: .35; transform: scale(.96);} 50% { opacity: .9; transform: scale(1.04);} }
 
 /* ── 页头 ─────────────────────────────────────────────────── */

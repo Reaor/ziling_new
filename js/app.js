@@ -1766,22 +1766,29 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ── Render loop ───────────────────────────────────────────
-  // ── 开屏动画（电路线如颜料注入 → 染出 logo 风 ^_^ → 右眼 wink → 高级淡出 → 呈现日程）──
-  // 思路：许多细线从画面外沿电路风折线汇向中心脸部轮廓，像"注入颜料"一样逐步把 ^_^ 染显出来；
-  // 注入完成线即隐去，脸短暂保持并 wink，随后整体高级淡出。颜色用高级强调色 INTRO_ACCENT。
+  // ── 开屏动画（电路线如颜料注入 → 染出品牌 logo 脸（山形眉眼+圆环）→ 右眼 wink → 高级淡出 → 呈现日程）──
+  // 思路：许多细线从画面外沿电路风折线汇向中心脸部轮廓，像"注入颜料"一样逐步把 logo 染显出来；
+  // 注入完成线即隐去，脸短暂保持并 wink，随后整体高级淡出。颜色用品牌青瓷 INTRO_ACCENT。
   const intro = { active: true, t: 0, lines: null, done: false };
   // 阶段：注入(线流入+脸渐染) → 保持/wink → 淡出。
   const INTRO_INJECT_MS = 1700, INTRO_HOLD_MS = 1300, INTRO_FADE_MS = 700;
   const INTRO_TOTAL = INTRO_INJECT_MS + INTRO_HOLD_MS + INTRO_FADE_MS;
-  const INTRO_ACCENT = '#5ec8d8';   // 高级强调色（青蓝），染色与脸用它；深浅主题都耐看
-  // logo 风 ^_^ 的笔画（相对中心、单位尺度 S）：左眼^、右眼^（wink 时变弧）、嘴⌣。粗线、圆头。
+  const INTRO_ACCENT = '#87C8B4';   // 品牌主色 · 青瓷（logo 用色；深浅主题都耐看）
+  // 品牌 logo 的笔画（相对中心、单位尺度 S）：左右两道山形眉眼 + 下方圆环。粗线、圆头。
+  // wink：右眼塌成一座平缓的小山（峰更低、更扁），与 logo 眨眼稿一致。
   function faceStrokes(cx, cy, S, winking) {
     const eyeGap = S * 0.92, eyeY = cy - S * 0.22, eyeW = S * 0.46;
     const hat = (ex) => [[ex - eyeW / 2, eyeY + eyeW * 0.5], [ex, eyeY - eyeW * 0.45], [ex + eyeW / 2, eyeY + eyeW * 0.5]];
     const strokes = [hat(cx - eyeGap / 2)];
-    if (winking) strokes.push([[cx + eyeGap / 2 - eyeW / 2, eyeY + eyeW * 0.12], [cx + eyeGap / 2, eyeY + eyeW * 0.5], [cx + eyeGap / 2 + eyeW / 2, eyeY + eyeW * 0.12]]);
+    if (winking) strokes.push([[cx + eyeGap / 2 - eyeW / 2, eyeY + eyeW * 0.5], [cx + eyeGap / 2, eyeY + eyeW * 0.08], [cx + eyeGap / 2 + eyeW / 2, eyeY + eyeW * 0.5]]);
     else strokes.push(hat(cx + eyeGap / 2));
-    strokes.push([[cx - S * 0.34, cy + S * 0.34], [cx + S * 0.34, cy + S * 0.34]]); // 嘴：^_^ 的"_"是平横线
+    // 圆环：闭合多边形点列（从顶部起整圈），染色时像一笔环着画圆。
+    const ring = [], R = S * 0.24, ringY = cy + S * 0.34, N = 28;
+    for (let i = 0; i <= N; i++) {
+      const a = -Math.PI / 2 + (i / N) * Math.PI * 2;
+      ring.push([cx + Math.cos(a) * R, ringY + Math.sin(a) * R]);
+    }
+    strokes.push(ring);
     return strokes;
   }
   function buildIntroLines(W, H, cx, cy) {

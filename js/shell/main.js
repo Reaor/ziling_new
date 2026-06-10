@@ -773,51 +773,60 @@ function openAccountSheet() {
     return;
   }
 
+  // 未登录：先探活后端，再决定给登录表单还是"未接入"说明（用户永远不用填服务器地址）。
   const sheet = openSheet(`
-    <h2 class="sheet-title">登录 zicodo</h2>
-    <div class="field"><label>服务器地址</label>
-      <input type="text" id="a-base" placeholder="https://你的服务器" value="${esc(api.getBase())}"></div>
-    <div class="field"><label>用户名 / 邮箱</label><input type="text" id="a-user" maxlength="50" autocomplete="username"></div>
-    <div class="field"><label>密码（注册需 ≥6 位）</label><input type="password" id="a-pass" maxlength="64" autocomplete="current-password"></div>
-    <div class="field" id="a-nick-row" style="display:none;"><label>昵称（可选）</label><input type="text" id="a-nick" maxlength="20"></div>
-    <button class="btn btn-primary" id="a-login" style="margin-bottom:8px;">登 录</button>
-    <button class="btn btn-ghost" id="a-reg">还没账号？注册一个</button>
-    <button class="btn btn-ghost" id="a-guest">游客一键体验（随机账号）</button>
-    <p class="hint-text" style="margin:8px 2px 0;">不登录也能用：数据存在本机。登录后任务云同步、可与真人组队、字灵直连后端 AI。</p>
+    <img class="sheet-logo" src="icons/logo.svg" alt="">
+    <h2 class="sheet-title" style="text-align:center;">zicodo 账户</h2>
+    <div class="empty" id="a-probe" style="padding:10px 0 18px;">正在连接后端…</div>
   `);
-  let mode = 'login';
-  const baseOf = () => $('#a-base', sheet).value.trim().replace(/\/$/, '');
-  $('#a-reg', sheet).addEventListener('click', () => {
-    mode = mode === 'login' ? 'register' : 'login';
-    $('#a-nick-row', sheet).style.display = mode === 'register' ? '' : 'none';
-    $('#a-login', sheet).textContent = mode === 'register' ? '注 册' : '登 录';
-    $('#a-reg', sheet).textContent = mode === 'register' ? '已有账号？去登录' : '还没账号？注册一个';
-  });
-  const finish = (u) => {
-    srvTeams = null; srvSelected = null;
-    closeSheet(); renderers[current]();
-    toast(`欢迎，${u.nickname || u.username}`);
-    api.pullTasks().catch(() => {});
-  };
-  $('#a-login', sheet).addEventListener('click', async () => {
-    const base = baseOf();
-    if (!/^https?:\/\//.test(base)) { toast('先填服务器地址（http/https）'); return; }
-    api.setBase(base);
-    const username = $('#a-user', sheet).value.trim();
-    const password = $('#a-pass', sheet).value;
-    if (!username || !password) { toast('用户名和密码都要填'); return; }
-    try {
-      const u = mode === 'register'
-        ? await api.register({ username, password, nickname: $('#a-nick', sheet).value.trim() })
-        : await api.login({ username, password });
-      finish(u);
-    } catch (e) { toast(e.message); }
-  });
-  $('#a-guest', sheet).addEventListener('click', async () => {
-    const base = baseOf();
-    if (!/^https?:\/\//.test(base)) { toast('先填服务器地址（http/https）'); return; }
-    api.setBase(base);
-    try { finish(await api.autoLogin()); } catch (e) { toast(e.message); }
+  api.health().then((ok) => {
+    if (!sheet.classList.contains('show')) return;
+    if (!ok) {
+      $('#a-probe', sheet).outerHTML = `
+        <p class="hint-text" style="margin:0 2px 14px; text-align:center; line-height:1.8;">
+          后端服务尚未接入，暂时无法登录。<br>
+          你现在用的是<b style="color:var(--ink)">本地模式</b>：全部功能可用，数据存在本机。<br>
+          后端上线后这里会自动变成登录入口。
+        </p>
+        <button class="btn btn-ghost" id="a-close">好的</button>`;
+      $('#a-close', sheet).addEventListener('click', closeSheet);
+      return;
+    }
+    $('#a-probe', sheet).outerHTML = `
+      <div class="field"><label>用户名 / 邮箱</label><input type="text" id="a-user" maxlength="50" autocomplete="username"></div>
+      <div class="field"><label>密码（注册需 ≥6 位）</label><input type="password" id="a-pass" maxlength="64" autocomplete="current-password"></div>
+      <div class="field" id="a-nick-row" style="display:none;"><label>昵称（可选）</label><input type="text" id="a-nick" maxlength="20"></div>
+      <button class="btn btn-primary" id="a-login" style="margin-bottom:8px;">登 录</button>
+      <button class="btn btn-ghost" id="a-reg">还没账号？注册一个</button>
+      <button class="btn btn-ghost" id="a-guest">游客一键体验（随机账号）</button>
+      <p class="hint-text" style="margin:8px 2px 0;">不登录也能用：数据存在本机。登录后任务云同步、可与真人组队、字灵直连后端 AI。</p>`;
+    let mode = 'login';
+    $('#a-reg', sheet).addEventListener('click', () => {
+      mode = mode === 'login' ? 'register' : 'login';
+      $('#a-nick-row', sheet).style.display = mode === 'register' ? '' : 'none';
+      $('#a-login', sheet).textContent = mode === 'register' ? '注 册' : '登 录';
+      $('#a-reg', sheet).textContent = mode === 'register' ? '已有账号？去登录' : '还没账号？注册一个';
+    });
+    const finish = (u) => {
+      srvTeams = null; srvSelected = null;
+      closeSheet(); renderers[current]();
+      toast(`欢迎，${u.nickname || u.username}`);
+      api.pullTasks().catch(() => {});
+    };
+    $('#a-login', sheet).addEventListener('click', async () => {
+      const username = $('#a-user', sheet).value.trim();
+      const password = $('#a-pass', sheet).value;
+      if (!username || !password) { toast('用户名和密码都要填'); return; }
+      try {
+        const u = mode === 'register'
+          ? await api.register({ username, password, nickname: $('#a-nick', sheet).value.trim() })
+          : await api.login({ username, password });
+        finish(u);
+      } catch (e) { toast(e.message); }
+    });
+    $('#a-guest', sheet).addEventListener('click', async () => {
+      try { finish(await api.autoLogin()); } catch (e) { toast(e.message); }
+    });
   });
 }
 
@@ -1154,6 +1163,11 @@ function showAlarm(task) {
 }
 
 /* ── 启动 ─────────────────────────────────────────────────── */
+// 联调通道：?api=https://后端地址 → 记住在本机（正式部署用 js/shell/config.js 或同源，用户无感知）
+try {
+  const apiParam = new URLSearchParams(location.search).get('api');
+  if (apiParam) api.setBase(apiParam);
+} catch { /* ignore */ }
 store.setSync(api.syncHandler);                 // 登录后任务操作镜像到 zicodo
 api.restoreSession().then((user) => { if (user && current !== 'ziling') renderers[current](); });
 remind.init({ onFire: showAlarm });             // 任务提醒/闹钟

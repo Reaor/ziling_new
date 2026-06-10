@@ -10,24 +10,39 @@
  */
 
 import * as store from './store.js';
+import { API_BASE } from './config.js';
 
 const LS = { base: 'zl.api.base', token: 'zl.api.token', user: 'zl.api.user' };
 const lsGet = (k) => { try { return localStorage.getItem(k) || ''; } catch { return ''; } };
 const lsSet = (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch { /* */ } };
 
-export const getBase = () => lsGet(LS.base).replace(/\/$/, '');
+/** 后端地址解析：?api= 联调覆盖 → 部署配置 config.js → 同源（Nginx 同域托管时零配置）。 */
+export const getBase = () => (lsGet(LS.base) || API_BASE || location.origin).replace(/\/$/, '');
 export function setBase(url) {
-  const base = (url || '').trim().replace(/\/$/, '');
-  lsSet(LS.base, base);
+  lsSet(LS.base, (url || '').trim().replace(/\/$/, ''));
   syncZilingGateway();
 }
 export const token = () => lsGet(LS.token);
 export const currentUser = () => { try { return JSON.parse(lsGet(LS.user) || 'null'); } catch { return null; } };
-export const isAuthed = () => !!(getBase() && token());
+export const isAuthed = () => !!token();
+
+/** 探活：后端是否可达（登录入口据此决定展示表单还是"未接入"说明）。 */
+export async function health(timeoutMs = 4000) {
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), timeoutMs);
+    const res = await fetch(getBase() + '/api/health', { signal: ctl.signal });
+    clearTimeout(timer);
+    if (!res.ok) return false;
+    const j = await res.json().catch(() => null);
+    return !!(j && (j.status === 'ok' || j.code === 0));
+  } catch { return false; }
+}
 
 /** 字灵 iframe 的网关配置与登录态共用同一组键（同源 localStorage）。 */
 function syncZilingGateway() {
-  lsSet('ziling.gateway', isAuthed() || getBase() ? getBase() : '');
+  // 只在已登录时把网关交给字灵：未接后端时让它安静地用 Mock，不做无谓的失败请求。
+  lsSet('ziling.gateway', isAuthed() ? getBase() : '');
   lsSet('ziling.gateway.prefix', '/ziling/api');
 }
 

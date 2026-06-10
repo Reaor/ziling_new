@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120">
+  <!-- logo 眨眼形态：右眼塌成平缓小山 -->
+  <g fill="none" stroke="#87C8B4" stroke-width="11" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 57 L37 31 L54 57"/>
+    <path d="M66 55 L83 44 L100 55"/>
+    <circle cx="60" cy="80" r="14"/>
+  </g>
+</svg>
